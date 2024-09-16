@@ -1,0 +1,41 @@
+---
+services:
+  meilisearch:
+    container_name: meilisearch
+    depends_on:
+      - grafana-promtail
+    dns:
+      - 172.21.0.200
+    environment:
+      - MEILI_NO_ANALYTICS=true
+      - PGID=1031
+      - PUID=1030
+      - TZ=America/Los_Angeles
+      - UMASK=007
+    expose:
+      - '7700'
+    image: getmeili/meilisearch:latest
+    networks:
+      safenet: null
+    restart: unless-stopped
+    volumes:
+      - /home/ns/services/meilisearch/volumes/data:/meili_data
+  meilisearch-indexer:
+    build: ./build/
+    container_name: meilisearch-indexer
+    depends_on:
+      - grafana-promtail
+      - meilisearch
+    dns:
+      - 172.21.0.200
+    environment:
+      - CRON_SCHEDULE=0 3 * * *
+      - DOMAIN=private.0819870.xyz
+      - MEILISEARCH_HOST=http://meilisearch:7700
+      - TZ=America/Los_Angeles
+    networks:
+      safenet: null
+    restart: unless-stopped
+    volumes:
+      - /home/ns/services/meilisearch/volumes/indexer:/app/data
+      - /home/ns/shared:/data:ro
