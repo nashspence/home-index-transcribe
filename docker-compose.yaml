@@ -7,11 +7,9 @@ services:
     dns:
       - 172.21.0.200
     environment:
+      - MEILI_LOG_LEVEL=debug
       - MEILI_NO_ANALYTICS=true
-      - PGID=1031
-      - PUID=1030
       - TZ=America/Los_Angeles
-      - UMASK=007
     expose:
       - '7700'
     image: getmeili/meilisearch:latest
