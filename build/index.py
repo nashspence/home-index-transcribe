@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 from faster_whisper import WhisperModel
 from datetime import datetime, timedelta
+import re
 
 
 logging.basicConfig(
@@ -426,8 +427,16 @@ max_processes = 14
 model = WhisperModel("small.en", device="cpu", num_workers=max_processes, cpu_threads=4, compute_type="int8")
 def get_whisper_fields(file_path):
     try:
-        audio_transcript_segments, _ = model.transcribe(file_path)
-        audio_transcript = " ".join([segment.text for segment in audio_transcript_segments])
+        audio_transcript = ""
+        audio_transcript_segments = []
+        
+        for segment in model.transcribe(file_path):
+            audio_transcript += segment.text + " "
+            audio_transcript_segments.append(segment)
+            
+        audio_transcript = re.sub(r'\s+', ' ', audio_transcript).strip()
+        audio_transcript = audio_transcript.strip()
+            
         return { "audio_transcript": audio_transcript, "audio_transcript_segments": audio_transcript_segments }
     except Exception as e:
         logging.exception(f'Error transcribing with whisper: {e}')

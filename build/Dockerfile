@@ -16,20 +16,26 @@ RUN apt-get update && apt-get install -y \
 ENV JAVA_HOME /usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH $JAVA_HOME/bin:$PATH
 
+# Set the working directory to /app
 WORKDIR /app
 
-RUN pip install meilisearch_python_sdk
-RUN pip install python-magic
-RUN pip install tika
-RUN pip install faster-whisper
-RUN pip install ffmpeg-python
+# Install Python dependencies
+RUN pip install meilisearch_python_sdk \
+    python-magic \
+    tika \
+    faster-whisper \
+    ffmpeg-python
 
 # Copy application files
 COPY index.py .
 
-# Copy the entrypoint script
+# Copy the entrypoint script and make it executable
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Set the entrypoint
+# Copy the cron wrapper script (cron-index.sh) and make it executable
+COPY cron-index.sh /app/cron-index.sh
+RUN chmod +x /app/cron-index.sh
+
+# Set the entrypoint to the entrypoint.sh script
 ENTRYPOINT ["/entrypoint.sh"]
