@@ -198,6 +198,7 @@ async def get_doc_count_meili():
         return stats.number_of_documents
     except Exception as e:
         logging.error(f"Error getting meili index stats.: {e}")
+        raise
 
 
 async def add_or_update_doc_meili(doc):
@@ -206,6 +207,7 @@ async def add_or_update_doc_meili(doc):
             await meili_index.update_documents([doc])
         except Exception as e:
             logging.error(f"Error adding or updating meili doc.: {e}")
+            raise
 
 
 async def add_or_update_docs_meili(docs):
@@ -216,6 +218,7 @@ async def add_or_update_docs_meili(docs):
                 await meili_index.update_documents(batch)
         except Exception as e:
             logging.error(f"Error adding and updating meili docs.: {e}")
+            raise
 
 
 async def delete_docs_by_id_meili(ids):
@@ -227,6 +230,7 @@ async def delete_docs_by_id_meili(ids):
                 await meili_index.delete_documents(ids=batch)
     except Exception as e:
         logging.error(f"Error deleting docs by id from meilisearch: {e}")
+        raise
 
 
 def get_mime_magic(file_path):
@@ -412,7 +416,6 @@ def does_support_mime_tika(mime):
             return True
     return False    
     
-    
 async def get_tika_fields(file_path):
     parsed = await asyncio.to_thread(lambda: parser.from_file(file_path))
     return { "text": parsed.get("content", "") }
@@ -430,7 +433,9 @@ def get_whisper_fields(file_path):
         audio_transcript = ""
         audio_transcript_segments = []
         
-        for segment in model.transcribe(file_path):
+        segments, _ = model.transcribe(file_path)
+        
+        for segment in segments:
             audio_transcript += segment.text + " "
             audio_transcript_segments.append(segment)
             
