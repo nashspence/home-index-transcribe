@@ -2,6 +2,7 @@ import sys
 import inspect
 import os
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from meilisearch_python_sdk import AsyncClient
 import magic
@@ -14,14 +15,23 @@ import time
 import asyncio
 import hashlib
 from faster_whisper import WhisperModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as datetime_time
 import re
 
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("./data/indexer.log"), logging.StreamHandler()],
+    handlers=[
+        TimedRotatingFileHandler(
+            "./data/indexer.log",
+            when="midnight",  # Rotate at midnight, but we will adjust for 2:30 AM
+            interval=1,  # Rotate every day
+            backupCount=7,  # Keep 7 backup files
+            atTime=datetime_time(2, 30)  # Rotate at 2:30 AM
+        ),
+        logging.StreamHandler(),
+    ],
 )
 
 
@@ -427,7 +437,7 @@ def does_support_mime_whisper(mime):
     return False
 
 max_processes = 14
-model = WhisperModel("small.en", device="cpu", num_workers=max_processes, cpu_threads=4, compute_type="int8")
+model = WhisperModel("medium", device="cpu", num_workers=max_processes, cpu_threads=4, compute_type="int8")
 def get_whisper_fields(file_path):
     try:
         audio_transcript = ""

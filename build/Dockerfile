@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y \
     file \
     ffmpeg \
     git \
+    procps \
+    psmisc \
     && apt-get clean
 
 # Set JAVA_HOME environment variable
