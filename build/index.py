@@ -1,22 +1,24 @@
-import sys
-import inspect
-import os
-import logging
-from logging.handlers import TimedRotatingFileHandler
-from pathlib import Path
-from meilisearch_python_sdk import AsyncClient
-import magic
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from tika import parser, config as tika_config
-import json
-import sqlite3
-from threading import Lock
-import time
 import asyncio
 import hashlib
-from faster_whisper import WhisperModel
-from datetime import datetime, timedelta, time as datetime_time
+import inspect
+import json
+import logging
+import magic
+import os
 import re
+import sqlite3
+import sys
+
+
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from datetime import datetime, timedelta, time as datetime_time
+from faster_whisper import WhisperModel
+from logging.handlers import TimedRotatingFileHandler
+from meilisearch_python_sdk import AsyncClient
+from pathlib import Path
+from threading import Lock
+from tika import parser, config as tika_config
+from time import sleep, time
 
 
 logging.basicConfig(
@@ -25,10 +27,10 @@ logging.basicConfig(
     handlers=[
         TimedRotatingFileHandler(
             "./data/indexer.log",
-            when="midnight",  # Rotate at midnight, but we will adjust for 2:30 AM
-            interval=1,  # Rotate every day
-            backupCount=7,  # Keep 7 backup files
-            atTime=datetime_time(2, 30)  # Rotate at 2:30 AM
+            when="midnight",
+            interval=1,
+            backupCount=7,
+            atTime=datetime_time(2, 30)
         ),
         logging.StreamHandler(),
     ],
@@ -62,6 +64,15 @@ start_time = datetime.now()
 deadline = start_time.replace(hour=2, minute=0, second=0, microsecond=0)
 if start_time > deadline:
     deadline += timedelta(days=1)
+    
+    
+def sleep_until_3am():
+    now = datetime.now()
+    next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if now >= next_run:
+        next_run += timedelta(days=1)
+    sleep((next_run - now).total_seconds())
+
 
 def quit_if_passed_deadline():
     if datetime.now() > deadline:
@@ -257,7 +268,7 @@ async def sync_meili_docs(job_does_support_mime_func_map):
     logging.info("Syncing meili docs with directory files.")
 
     previous_mtime = load_mtime_db()
-    current_time = time.time()
+    current_time = time()
 
     exists_lock = Lock()
     exists = []
@@ -426,6 +437,7 @@ def does_support_mime_tika(mime):
             return True
     return False    
     
+    
 async def get_tika_fields(file_path):
     parsed = await asyncio.to_thread(lambda: parser.from_file(file_path))
     return { "text": parsed.get("content", "") }
@@ -435,6 +447,7 @@ def does_support_mime_whisper(mime):
     if (mime.startswith("audio/") or mime.startswith("video/")):
         return True
     return False
+
 
 max_processes = 14
 model = WhisperModel("medium", device="cpu", num_workers=max_processes, cpu_threads=4, compute_type="int8")
@@ -458,10 +471,7 @@ def get_whisper_fields(file_path):
         raise
     
 
-async def main():
-    init_db()
-    await init_meili()
-    
+async def update_meili_docs():
     logging.info("Update meilisearch docs.")
     
     await sync_meili_docs({
@@ -474,6 +484,15 @@ async def main():
     
     sqlite3_connection.close()
     logging.info("Done updating meilisearch docs.")
+    
+
+async def main():
+    init_db()
+    await init_meili()
+    await update_meili_docs()
+    while True:
+        sleep_until_3am()
+        await update_meili_docs()
 
 
 if __name__ == "__main__":

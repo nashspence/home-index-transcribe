@@ -27,7 +27,6 @@ services:
     dns:
       - 172.21.0.200
     environment:
-      - CRON_SCHEDULE=0 3 * * *
       - DOMAIN=private.0819870.xyz
       - MEILISEARCH_HOST=http://meilisearch:7700
       - TZ=America/Los_Angeles
