@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, time as datetime_time
 from faster_whisper import WhisperModel
 from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient
+from multiprocessing import Process
 from pathlib import Path
 from tika import parser, config as tika_config
 from time import time
@@ -413,6 +414,21 @@ async def handle_file_move(old_file_path, new_file_path):
         logging.info(f'update meili doc "{old_relative_path}" is now "{new_relative_path}"')
     except Exception as e:
         logging.error(f'failed to update meili doc "{old_relative_path}" to "{new_relative_path}": {e}')
+        
+def start_observer():
+    init_db()
+    asyncio.run(init_meili())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    observer = Observer()
+    handler = MoveEventHandler(loop)
+    observer.schedule(handler, DIRECTORY_TO_INDEX, recursive=True)
+    observer.start()
+    try:
+        loop.run_forever()
+    finally:
+        observer.stop()
+        observer.join()
     
 async def augment_meili_docs(tool_name, get_additional_fields_with_tool, max_workers=MAX_WORKERS):
     if is_deadline_passed():
@@ -544,9 +560,8 @@ async def main():
     init_db()
     await init_meili()
     
-    observer = Observer()
-    observer.schedule(MoveEventHandler(asyncio.get_running_loop()), DIRECTORY_TO_INDEX, recursive=True)
-    observer.start()
+    observer_process = Process(target=start_observer)
+    observer_process.start()
     
     await update_meili_docs()
     while True:
