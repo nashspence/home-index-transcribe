@@ -4,7 +4,10 @@ FROM python:3.9-slim
 
 RUN apt-get update && apt-get install -y \
     openjdk-17-jre-headless \
+    shared-mime-info \
+    xdg-utils \
     libmagic1 \
+    file \
     ffmpeg \
     && apt-get clean
 
