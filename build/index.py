@@ -410,9 +410,9 @@ async def handle_file_move(old_file_path, new_file_path):
         old_doc['url'] = f"https://{DOMAIN}/{new_relative_path}"
         
         await add_or_update_doc_meili(old_doc)
-        logging.info(f'update meili doc "{old_file_path}" is now "{new_file_path}"')
+        logging.info(f'update meili doc "{old_relative_path}" is now "{new_relative_path}"')
     except Exception as e:
-        logging.error(f'failed to update meili doc "{old_file_path}" to "{new_file_path}": {e}')
+        logging.error(f'failed to update meili doc "{old_relative_path}" to "{new_relative_path}": {e}')
     
 async def augment_meili_docs(tool_name, get_additional_fields_with_tool, max_workers=MAX_WORKERS):
     if is_deadline_passed():
