@@ -17,7 +17,8 @@ RUN pip install meilisearch_python_sdk \
     python-magic \
     tika \
     faster-whisper \
-    ffmpeg-python
+    ffmpeg-python \
+    watchdog
 
 COPY index.py .
 
