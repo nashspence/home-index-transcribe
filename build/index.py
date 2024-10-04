@@ -1,26 +1,24 @@
 import asyncio
 import hashlib
 import inspect
-import json
 import logging
 import magic
 import os
-import re
-import sqlite3
 import mimetypes
 
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, time as datetime_time
-from faster_whisper import WhisperModel
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import time
 from logging.handlers import TimedRotatingFileHandler
-from meilisearch_python_sdk import AsyncClient
+from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process
 from pathlib import Path
-from tika import parser, config as tika_config
-from time import time
-from threading import Lock
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+import tika_module
+import whisper_module
+
+modules = [tika_module, whisper_module]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +29,7 @@ logging.basicConfig(
             when="midnight",
             interval=1,
             backupCount=7,
-            atTime=datetime_time(2, 30)
+            atTime=time(2, 30)
         ),
         logging.StreamHandler(),
     ],
@@ -45,301 +43,177 @@ for logger_name in other_loggers:
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(file_handler)
     logger.propagate = False 
-    
-watchdog_logger = logging.getLogger('watchdog')
 
-VERSION = 1
 DIRECTORY_TO_INDEX = os.environ.get("DIRECTORY_TO_INDEX", "/data")
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
 INDEX_NAME = os.environ.get("INDEX_NAME", "files")
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "1000"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "10000"))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "32"))
-DB_FILE = os.environ.get('DB_FILE', './data/sqlite3.db')
 
-sqlite3_connection = sqlite3.connect(DB_FILE)
-sqlite3_cursor = sqlite3_connection.cursor()
-meili_index = None
-
-async def sleep_until_3am():
-    now = datetime.now()
-    next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
-    if now >= next_run:
-        next_run += timedelta(days=1)
-    await asyncio.sleep((next_run - now).total_seconds())
-    
-deadline = datetime.now()  
-def reset_deadline():
-    global deadline
-    start_time = datetime.now()
-    deadline = start_time.replace(hour=2, minute=0, second=0, microsecond=0)
-    if start_time >= deadline:
-        deadline += timedelta(days=1)
-
-def is_deadline_passed():
-    return datetime.now() > deadline
-
-def remaining_time_until_deadline():
-    now = datetime.now()
-    remaining_time = (deadline - now).total_seconds()
-    if remaining_time < 0:
-        return 0
-    return remaining_time
-
-def init_db(): 
-    sqlite3_cursor.execute('PRAGMA foreign_keys = ON;')
-    
-    sqlite3_cursor.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mtime REAL
-        )
-    ''')
-    
-    sqlite3_cursor.execute('''
-        CREATE TABLE IF NOT EXISTS file_paths (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT UNIQUE,
-            mtime REAL
-        );
-    ''')
-    
-    sqlite3_cursor.execute('''
-        CREATE TABLE IF NOT EXISTS moved_file_paths (
-            file_path_id INTEGER UNIQUE,
-            file_path TEXT,
-            FOREIGN KEY (file_path_id) REFERENCES file_paths (id) ON DELETE CASCADE,
-            PRIMARY KEY (file_path_id)
-        );
-    ''')
-
-    sqlite3_cursor.execute('''
-        CREATE TABLE IF NOT EXISTS job_file_paths (
-            job_name TEXT,
-            file_path_id INTEGER,
-            FOREIGN KEY (file_path_id) REFERENCES file_paths (id) ON DELETE CASCADE,
-            PRIMARY KEY (job_name, file_path_id)
-        );
-    ''')
-    
-    try:
-        load_mtime_db()
-    except Exception as e:
-        sqlite3_cursor.execute('INSERT INTO settings (mtime) VALUES (?)', (0,))
-        
-    sqlite3_connection.commit()
-    
-def update_mtime_db(mtime):
-    sqlite3_cursor.execute('UPDATE settings SET mtime = ? WHERE id = 1', (mtime,))
-    sqlite3_connection.commit()
-
-def load_mtime_db():
-    sqlite3_cursor.execute('SELECT mtime FROM settings WHERE id = 1')
-    mtime = sqlite3_cursor.fetchone()[0]
-    return mtime
-
-def add_or_replace_file_paths(file_path_rows):
-    sqlite3_cursor.executemany("""
-        INSERT INTO file_paths (file_path, mtime) 
-        VALUES (?, ?)
-        ON CONFLICT(file_path) 
-        DO UPDATE SET mtime = excluded.mtime
-    """, [(row['file_path'], row['mtime']) for row in file_path_rows])
-    sqlite3_connection.commit()
-    
-def update_file_path_db(old_file_path, new_file_path):
-    sqlite3_cursor.execute('''
-        UPDATE file_paths SET file_path = ? WHERE file_path = ?
-    ''', (new_file_path, old_file_path))
-    sqlite3_connection.commit()
-    
-def update_file_paths_db(file_path_updates):
-    sqlite3_cursor.executemany('''
-        UPDATE file_paths SET file_path = ? WHERE file_path = ?
-    ''', [(new_file_path, old_file_path) for old_file_path, new_file_path in file_path_updates])
-    sqlite3_connection.commit()
-    
-def get_file_path_mtime_db(file_path):
-    result = sqlite3_cursor.execute("SELECT mtime FROM file_paths WHERE file_path = ?", (file_path,)).fetchone()
-    
-    if result is None:
-        return None
-    
-    return result
-    
-def add_job_file_paths_db(job_name, file_paths):
-    for file_path in file_paths:
-        sqlite3_cursor.execute('''
-            SELECT id FROM file_paths WHERE file_path = ?
-        ''', (file_path,))
-        
-        file_path_id = sqlite3_cursor.fetchone()[0]
-
-        sqlite3_cursor.execute('''
-            INSERT OR IGNORE INTO job_file_paths (job_name, file_path_id)
-            VALUES (?, ?)
-        ''', (job_name, file_path_id))
-    
-    sqlite3_connection.commit()
-    
-def add_moved_file_path_db(old_file_path, new_file_path):
-    sqlite3_cursor.execute('''
-        SELECT id FROM file_paths WHERE file_path = ?
-    ''', (old_file_path,))
-    
-    file_path_id = sqlite3_cursor.fetchone()[0]
-
-    sqlite3_cursor.execute('''
-        INSERT INTO moved_file_paths (file_path_id, file_path) 
-        VALUES (?)
-        ON CONFLICT(file_path_id) 
-        DO UPDATE SET file_path = excluded.file_path
-    ''', (file_path_id, new_file_path))
-    
-    sqlite3_connection.commit()
-    
-def get_moved_file_paths_db():
-    sqlite3_cursor.execute('''
-        SELECT fp.file_path AS old_file_path, mfp.file_path AS new_file_path
-        FROM moved_file_paths mfp
-        JOIN file_paths fp ON mfp.file_path_id = fp.id
-    ''')
-    return [(row[0], row[1]) for row in sqlite3_cursor.fetchall()]
-    
-def get_file_paths_db():
-    sqlite3_cursor.execute("SELECT file_path FROM file_paths")
-    db_file_paths = {row[0] for row in sqlite3_cursor.fetchall()}
-    return db_file_paths
-    
-def delete_file_paths_db(file_paths_to_delete):
-    if not file_paths_to_delete:
-        return
-
-    file_paths_list = list(file_paths_to_delete)
-
-    query = "DELETE FROM file_paths WHERE file_path IN ({})".format(
-        ",".join("?" * len(file_paths_list))
-    )
-    
-    sqlite3_cursor.execute(query, file_paths_list)
-    sqlite3_connection.commit()
-
-def get_job_file_paths_db(job_name):
-    sqlite3_cursor.execute('''
-        SELECT fp.file_path
-        FROM job_file_paths jfp
-        JOIN file_paths fp ON jfp.file_path_id = fp.id
-        WHERE jfp.job_name = ?
-        ORDER BY fp.mtime DESC
-    ''', (job_name,))
-
-    return [row[0] for row in sqlite3_cursor.fetchall()]
-    
-def remove_job_name_file_path_db(job_name, file_path):
-    sqlite3_cursor.execute('''
-        SELECT id FROM file_paths WHERE file_path = ?
-    ''', (file_path,))
-    
-    result = sqlite3_cursor.fetchone()
-
-    if result is None:
-        return
-
-    file_path_id = result[0]
-
-    sqlite3_cursor.execute('''
-        DELETE FROM job_file_paths WHERE job_name = ? AND file_path_id = ?
-    ''', (job_name, file_path_id))
-    
-    sqlite3_connection.commit()
-
-def clear_job_name_file_paths_db(job_name):
-    sqlite3_cursor.execute("DELETE FROM job_file_paths WHERE job_name = ?", (job_name,))
-    sqlite3_connection.commit()
-    
-def clear_moved_file_paths():
-    sqlite3_cursor.execute('DELETE FROM moved_file_paths')
-    sqlite3_connection.commit()
+client = None
+index = None
 
 async def init_meili():
-    global meili_index
+    global client, index
     client = AsyncClient(MEILISEARCH_HOST)
-        
     try:
-        meili_index = await client.get_index(INDEX_NAME)
+        index = await client.get_index(INDEX_NAME)
     except Exception as e:
-        if e.code == "index_not_found":
+        if getattr(e, 'code', None) == "index_not_found":
             try:
-                await client.create_index(INDEX_NAME, "id")
-                logging.info(f"Creating meili index '{INDEX_NAME}'.")
-                meili_index = await client.get_index(INDEX_NAME)
-            except Exception as e:
-                logging.error(f"failed to init meili: {e.message}")
+                logging.info(f"Creating MeiliSearch index '{INDEX_NAME}'.")
+                index = await client.create_index(INDEX_NAME, primary_key="id")
+            except Exception as create_e:
+                logging.error(f"Failed to create MeiliSearch index '{INDEX_NAME}': {create_e.message}")
                 raise
         else:
-            logging.error(f"failed to init meili: {e.message}")
+            logging.error(f"Failed to initialize MeiliSearch: {e.message}")
             raise
 
-async def get_doc_count_meili():
+    filterable_attributes = ["id"] + [module.FIELD_NAME for module in modules]
+    
     try:
-        stats = await meili_index.get_stats()
-        return stats.number_of_documents
-    except Exception as e:
-        logging.error(f"failed to gett meili index stats: {e}")
+        await index.update_filterable_attributes(filterable_attributes)
+        await index.update_sortable_attributes(["mtime"])
+    except Exception as attr_e:
+        logging.error(f"Failed to update index attributes: {attr_e}")
         raise
 
-async def add_or_update_doc_meili(doc):
+async def get_doc_count_meili():
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
+    
+    try:
+        stats = await index.get_stats()
+        return stats.number_of_documents
+    except Exception as e:
+        logging.error(f"Failed to get MeiliSearch index stats: {e}")
+        raise
+
+async def add_or_update_doc_meili(doc, wait_for_task=False):
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
+    
     if doc:
         try:
-            await meili_index.update_documents([doc])
+            task = await index.update_documents([doc])
+            if wait_for_task:
+                await wait_for_task_completion_meili(task)
         except Exception as e:
-            logging.error(f"failed to adding or update meili doc: {e}")
+            logging.error(f"Failed to add or update MeiliSearch document: {e}")
             raise
 
-async def add_or_update_docs_meili(docs):
+async def add_or_update_docs_meili(docs, wait_for_task=False):
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
+    
     if docs:
         try:
             for i in range(0, len(docs), BATCH_SIZE):
-                batch = docs[i:i+BATCH_SIZE]
-                await meili_index.update_documents(batch)
+                batch = docs[i:i + BATCH_SIZE]
+                task = await index.update_documents(batch)
+                if wait_for_task:
+                    await wait_for_task_completion_meili(task)
         except Exception as e:
-            logging.error(f"failed to add/update meili docs: {e}")
+            logging.error(f"Failed to add/update MeiliSearch documents: {e}")
             raise
 
-async def delete_docs_by_id_meili(ids):
+async def delete_docs_by_id_meili(ids, wait_for_task=False):
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
+    
     try:
         if ids:
             for i in range(0, len(ids), BATCH_SIZE):
-                batch = ids[i:i+BATCH_SIZE]
-                await meili_index.delete_documents(ids=batch)
+                batch = ids[i:i + BATCH_SIZE]
+                task = await index.delete_documents(ids=batch)
+                if wait_for_task:
+                    await wait_for_task_completion_meili(task)
     except Exception as e:
-        logging.error(f"failed to delete meili docs by id: {e}")
+        logging.error(f"Failed to delete MeiliSearch documents by ID: {e}")
         raise
-    
+
 async def get_doc_meili(doc_id):
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
+    
     try:
-        doc = await meili_index.get_document(doc_id)
+        doc = await index.get_document(doc_id)
         return doc
     except Exception as e:
-        logging.error(f"failed to get meili doc with id {doc_id}: {e}")
-        return None
+        logging.error(f"Failed to get MeiliSearch document with ID {doc_id}: {e}")
+        raise
+
+async def get_all_docs_meili():
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
     
-async def get_batch_docs_meili(doc_ids):
+    docs = []
+    offset = 0
+    limit = BATCH_SIZE
     try:
-        documents = await meili_index.get_documents(ids=doc_ids)
-        return documents
+        while True:
+            result = await index.get_documents(offset=offset, limit=limit)
+            docs.extend(result.results)
+            if len(result.results) < limit:
+                break
+            offset += limit
+        return docs
     except Exception as e:
-        logging.error(f"failed to get meili docs with ids {doc_ids}: {e}")
-        return None
+        logging.error(f"Failed to retrieve all MeiliSearch documents: {e}")
+        raise
+
+async def get_all_pending_jobs(module):
+    if not index:
+        raise Exception("MeiliSearch index is not initialized.")
+    
+    docs = []
+    offset = 0
+    limit = BATCH_SIZE
+    filter_query = f'{module.FIELD_NAME} < {module.VERSION}'
+    
+    try:
+        while True:
+            response = await index.get_documents(
+                filter=filter_query,
+                limit=limit,
+                offset=offset,
+                fields=["url", "mtime"]
+            )
+            docs.extend(response.results)
+            if len(response.results) < limit:
+                break
+            offset += limit
+        return docs
+    except Exception as e:
+        logging.error(f"Failed to get pending jobs from MeiliSearch: {e}")
+        raise
+
+async def wait_for_task_completion_meili(task_info):
+    if not client:
+        raise Exception("MeiliSearch client is not initialized.")
+    
+    try:
+        while True:
+            task = await client.get_task(task_info.task_uid)
+            if task.status == 'succeeded':
+                return
+            elif task.status == 'failed':
+                raise Exception("MeiliSearch task failed!")
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        logging.error(f"Error while waiting for task completion: {e}")
+        raise
 
 def get_mime_magic(file_path):
     mime = magic.Magic(mime=True)
     mime_type = mime.from_file(file_path)
     
     if mime_type == 'application/octet-stream':
-        mime_type = os.popen(f'xdg-mime query filetype "{file_path}"').read().strip()
+        mime_type, _ = mimetypes.guess_type(file_path)
         
-        if not mime_type:
+        if mime_type is None:
             mime_type = 'application/octet-stream'
     
     return mime_type
@@ -347,311 +221,275 @@ def get_mime_magic(file_path):
 def get_meili_id_from_relative_path(relative_path):
     return hashlib.sha256(relative_path.encode()).hexdigest()
 
-async def move_meili_docs():
-    try:
-        logging.info(f"get moved file paths db queue")
-        moved_file_paths = get_moved_file_paths_db()
-        
-        if not moved_file_paths:
-            logging.info("no moved file paths in db queue")
-            return
+def get_meili_id_from_file_path(file_path):
+    return get_meili_id_from_relative_path(get_relative_path_from_file_path(file_path))
 
-        old_doc_ids = []
-        new_doc_ids = []
-        updated_docs = []
+def get_file_path_from_meili_doc(doc):
+    return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{DIRECTORY_TO_INDEX}/")).as_posix()
 
-        for old_file_path, new_file_path in moved_file_paths:
-            old_relative_path = Path(old_file_path).relative_to(DIRECTORY_TO_INDEX).as_posix()
-            new_relative_path = Path(new_file_path).relative_to(DIRECTORY_TO_INDEX).as_posix()
+def get_relative_path_from_meili_doc(doc):
+    return Path(doc['url'].replace(f"https://{DOMAIN}/", "")).as_posix()
 
-            old_doc_id = get_meili_id_from_relative_path(old_relative_path)
-            new_doc_id = get_meili_id_from_relative_path(new_relative_path)
+def get_url_from_relative_path(relative_path):
+    return f"https://{DOMAIN}/{relative_path}"
 
-            old_doc_ids.append(old_doc_id)
-            new_doc_ids.append(new_doc_id)
+def get_relative_path_from_file_path(file_path):
+    return Path(file_path).relative_to(DIRECTORY_TO_INDEX).as_posix()
 
-        logging.info(f"get and update {len(old_doc_ids)} meili docs")
-        old_docs = await get_batch_docs_meili(old_doc_ids)
-        
-        if old_docs:
-            for i in range(len(old_docs)):
-                old_doc = old_docs[i]
-                if old_doc:
-                    new_file_path = moved_file_paths[i][1] 
-                    new_relative_path = Path(new_file_path).relative_to(DIRECTORY_TO_INDEX).as_posix()
+async def sync_meili_docs():
+    logging.info("sync meili docs with files")
 
-                    old_doc['id'] = new_doc_ids[i]
-                    old_doc['name'] = Path(new_file_path).name
-                    old_doc['url'] = f"https://{DOMAIN}/{new_relative_path}"
-                    updated_docs.append(old_doc)
-
-        if updated_docs:
-            logging.info(f"delete {len(old_doc_ids)} moved meili docs")
-            await delete_docs_by_id_meili(old_doc_ids)
-            logging.info(f"re-add {len(old_doc_ids)} updated meili docs")
-            await add_or_update_docs_meili(updated_docs)
-            logging.info(f"update {len(moved_file_paths)} db file paths")
-            update_file_paths_db(moved_file_paths)
-            logging.info(f"clear moved paths db queue")
-            clear_moved_file_paths()
-
-        logging.info(f"moved {len(updated_docs)} meili docs")
-    except Exception as e:
-        clear_moved_file_paths()
-        logging.error(f"failed to move meili docs: {e}")
-
-async def sync_meili_docs(job_does_support_mime_func_map):
-    logging.info("Syncing meili docs with directory files.")
-
-    previous_mtime = load_mtime_db()
-    current_time = time()
-
-    exists_lock = Lock()
-    exists = []
-    exists_rows = []
-
-    updated_lock = Lock()
-    updated = []
-
-    file_paths_by_job_lock = Lock()
-    file_paths_by_job_name = {job_name: [] for job_name in job_does_support_mime_func_map}
-
-    def handle_file_path(entry):
-        try:
-            if entry.is_file(follow_symlinks=False):
-                path = Path(entry.path)
-                relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
-                stat = path.stat()
-                
-                logging.info(f'found "{relative_path}"')
-                current_mtime = entry.stat().st_mtime
-                
-                with exists_lock:
-                    exists.append(entry.path)
-                    exists_rows.append({"file_path": entry.path, "mtime": current_mtime})
-                
-                if current_mtime > previous_mtime:
-                    mime = get_mime_magic(path)
-
-                    document = {
-                        "id": get_meili_id_from_relative_path(relative_path),
-                        "name": path.name,
-                        "size": stat.st_size,
-                        "mtime": current_mtime,
-                        "ctime": stat.st_ctime,
-                        "url": f"https://{DOMAIN}/{relative_path}",
-                        "type": mime,
-                    }
-
-                    with updated_lock:
-                        updated.append(document)
-
-                    for job_name, does_support_mime in job_does_support_mime_func_map.items():
-                        if does_support_mime(mime):
-                            with file_paths_by_job_lock:
-                                file_paths_by_job_name[job_name].append(entry.path)
-        except Exception as e:
-            logging.exception(f'failed "{relative_path}": {e}')
-            
-    await move_meili_docs()
+    all_docs = await get_all_docs_meili()
+    existing_meili_file_paths = set()
+    existing_docs = {}
     
+    logging.info(f"{len(all_docs)} meili docs exist")
+
+    for doc in all_docs:
+        file_path = get_file_path_from_meili_doc(doc)
+        existing_meili_file_paths.add(file_path)
+        existing_docs[doc["id"]] = doc
+
     directories_to_scan = [DIRECTORY_TO_INDEX]
+    updated = []
+    exists = set()
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = []
+
         while directories_to_scan:
             dir_path = directories_to_scan.pop()
-            with os.scandir(dir_path) as it:
-                for entry in it:
-                    if entry.is_dir(follow_symlinks=False):
-                        directories_to_scan.append(entry.path)
-                    else:
-                        executor.submit(handle_file_path, entry)
-
-        executor.shutdown(wait=True)
-
-    add_or_replace_file_paths(exists_rows)
-
-    for job_name, file_paths in file_paths_by_job_name.items():
-        if file_paths:
-            add_job_file_paths_db(job_name, file_paths)
-
-    await add_or_update_docs_meili(updated)
-    
-    deleted = list(set(get_file_paths_db()) - set(exists))
-    
-    deleted_meili_ids = [
-        get_meili_id_from_relative_path(Path(file_path).relative_to(DIRECTORY_TO_INDEX).as_posix())
-        for file_path in deleted
-    ]
-    
-    await delete_docs_by_id_meili(deleted_meili_ids)
-    delete_file_paths_db(deleted)
-    
-    update_mtime_db(current_time)
-    count = await get_doc_count_meili()
-
-    logging.info(f"Done syncing {count} meili docs with directory files.")
-    
-async def augment_meili_docs(tool_name, get_additional_fields_with_tool, max_workers=MAX_WORKERS):
-    if is_deadline_passed():
-        return
-    
-    try:
-        file_paths = get_job_file_paths_db(tool_name)
-    except Exception as e:
-        logging.exception(f"Failed to get job file paths for {tool_name}: {e}")
-        
-    if len(file_paths) > 0:
-        logging.info(f"Augmenting meili docs with {tool_name}.")
-
-        semaphore = asyncio.Semaphore(max_workers)
-        counter = 0
-        counter_lock = asyncio.Lock()
-    
-        async def handle_file_path(file_path):
-            nonlocal counter
-            
-            async with semaphore:
-                path = Path(file_path)
-                
-                relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
-                
-                mime = get_mime_magic(file_path)
-                logging.info(f'{tool_name} start {counter}/{len(file_paths)} ({mime}) "{relative_path}"')
-                
-                if not path.exists():
-                    async with counter_lock:
-                        counter += 1
-                        logging.error(f'{tool_name} error {counter}/{len(file_paths)} ({mime}) "{relative_path}": not found')
-                    return
-
-                try:                    
-                    if inspect.iscoroutinefunction(get_additional_fields_with_tool):
-                        additional_fields = await get_additional_fields_with_tool(file_path)
-                    else:
-                        additional_fields = await asyncio.to_thread(get_additional_fields_with_tool, file_path)
-
-                    if not path.exists():
-                        return
-
-                    doc = {
-                        "id": get_meili_id_from_relative_path(relative_path),
-                        **additional_fields,
-                    }
-                    
-                    if not path.exists():
-                        async with counter_lock:
-                            counter += 1
-                            logging.error(f'{tool_name} error {counter}/{len(file_paths)} ({mime}) "{relative_path}": not found')
-                        return
-
-                    await add_or_update_doc_meili(doc)
-                    remove_job_name_file_path_db(tool_name, file_path)
-                    
-                    async with counter_lock:
-                        counter += 1
-                        logging.info(f'{tool_name} done {counter}/{len(file_paths)} ({mime}) "{relative_path}"')
-                except Exception as e:
-                    async with counter_lock:
-                        counter += 1
-                        logging.exception(f'{tool_name} error {counter}/{len(file_paths)} ({mime}) "{relative_path}": {e}')
-                        
-                return
-            
-        try:
-            tasks = [asyncio.create_task(handle_file_path(file_path)) for file_path in file_paths]
             try:
-                await asyncio.wait_for(asyncio.gather(*tasks), timeout=remaining_time_until_deadline())
-            except asyncio.TimeoutError:
-                logging.info(f"{tool_name} stopping. Deadline reached.")
-        except Exception as e:
-            logging.exception(f'Error reading with {tool_name}: {e}')
-            
-        logging.info(f"Done augmenting meili docs with {tool_name}.")
-    
-tika_mimes = json.loads(tika_config.getMimeTypes())
-def does_support_mime_tika(mime):
-    archive_mimes = {
-        'application/zip', 'application/x-tar', 'application/gzip',
-        'application/x-bzip2', 'application/x-7z-compressed', 'application/x-rar-compressed'
-    }
-    
-    if mime in tika_mimes:
-        if (mime.startswith("text/") or mime.startswith("application/")) and mime not in archive_mimes:
-            return True
-    return False    
-    
-def get_tika_fields(file_path):
-    parsed = parser.from_file(file_path)
-    return { "text": parsed.get("content", "") }
+                with os.scandir(dir_path) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            directories_to_scan.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            futures.append(executor.submit(create_meili_doc_from_file_path, entry.path, existing_docs))
+            except Exception as e:
+                logging.exception(f'failed to scan directory "{dir_path}": {e}')
 
-def does_support_mime_whisper(mime):
-    if (mime.startswith("audio/") or mime.startswith("video/")):
-        return True
-    return False
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                file_path, document = result
+                exists.add(file_path)
+                updated.append(document)
 
-max_processes = 14
-model = WhisperModel("medium", device="cpu", num_workers=max_processes, cpu_threads=4, compute_type="int8")
-model_lock = Lock()
-def get_whisper_fields(file_path):
+    deleted = existing_meili_file_paths - exists
+    deleted_meili_ids = [get_meili_id_from_file_path(file_path) for file_path in deleted]
+
+    await asyncio.gather(
+        delete_docs_by_id_meili(deleted_meili_ids, wait_for_task=True),
+        add_or_update_docs_meili(updated, wait_for_task=True)
+    )
+    
+    doc_count = await get_doc_count_meili()
+    
+    logging.info(f"{len(deleted_meili_ids)} meili docs deleted")
+    logging.info(f"{len(updated)} meili docs created/updated")
+    logging.info(f"{doc_count} meili docs now exist")
+
+def create_meili_doc_from_file_path(file_path, existing_docs = {}):
     try:
-        with model_lock:
-            audio_transcript = ""
-            audio_transcript_segments = []
-            
-            segments, _ = model.transcribe(file_path)
-            
-            for segment in segments:
-                audio_transcript += segment.text + " "
-                audio_transcript_segments.append(segment)
-                
-            audio_transcript = re.sub(r'\s+', ' ', audio_transcript).strip()
-            audio_transcript = audio_transcript.strip()
-                
-            return { "audio_transcript": audio_transcript, "audio_transcript_segments": audio_transcript_segments }
+        path = Path(file_path)
+        relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
+        stat = path.stat()
+
+        current_mtime = stat.st_mtime
+
+        mime = get_mime_magic(path)
+        doc_id = get_meili_id_from_relative_path(relative_path)
+
+        document = {
+            "id": doc_id,
+            "name": path.name,
+            "size": stat.st_size,
+            "mtime": current_mtime,
+            "ctime": stat.st_ctime,
+            "url": get_url_from_relative_path(relative_path),
+            "type": mime,
+        }
+
+        for module in modules:
+            if module.does_support_mime(mime):
+                existing_doc = existing_docs.get(doc_id, {})
+                if not existing_doc.get(module.FIELD_NAME):
+                    document[module.FIELD_NAME] = 0
+
+        return (file_path, document)
     except Exception as e:
-        logging.exception(f'Error transcribing with whisper: {e}')
-        raise
+        logging.exception(f'failed to create meili doc for "{file_path}": {e}')
+        return None
+
+async def augment_meili_docs(module):    
+    try:
+        pending_jobs = await get_all_pending_jobs(module)
+        file_paths = [
+            get_file_path_from_meili_doc(doc)
+            for doc in sorted(pending_jobs, key=lambda x: x['mtime'], reverse=True)
+        ]
+    except Exception as e:
+        logging.exception(f"failed to file paths for {module.NAME}: {e}")
+        return
+
+    if not file_paths:
+        return
+
+    logging.info(f"do {len(file_paths)} meili docs with {module.NAME}")
+
+    semaphore = asyncio.Semaphore(module.MAX_WORKERS)
+    tasks = [asyncio.create_task(handle_file_path_augment_with_semaphore(fp, semaphore, module)) for fp in file_paths]
+
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        logging.exception(f'{module.NAME} batch failed: {e}')
+        return
+
+    success_count = 0
+    failure_count = 0
+    not_found_count = 0
+
+    for result in results:
+        if isinstance(result, Exception):
+            failure_count += 1
+            logging.exception(f"{module.NAME} file failed:", exc_info=result)
+        elif result is True:
+            success_count += 1
+        elif result is False:
+            failure_count += 1
+        elif result is None:
+            not_found_count += 1
+
+    logging.info(
+        f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}"
+    )
+
+async def augment_meili_doc_from_file_path(file_path, module):    
+    path = Path(file_path)
+    relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
+
+    logging.info(f'{module.NAME} trying "{relative_path}"')
+
+    if not path.exists():
+        logging.error(f'{module.NAME} failed "{relative_path}": not found')
+        return None
+
+    try:
+        if inspect.iscoroutinefunction(module.get_fields):
+            fields = await module.get_fields(file_path)
+        else:
+            fields = await asyncio.to_thread(module.get_fields, file_path)
+    except Exception as e:
+        logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
+        return False
     
-async def update_meili_docs():
-    logging.info("Update meilisearch docs.")
+    if not path.exists():
+        logging.error(f'{module.NAME} failed "{relative_path}": not found after processing')
+        return None
+
+    try:
+        doc = {
+            "id": get_meili_id_from_relative_path(relative_path),
+            f'{module.FIELD_NAME}': module.VERSION,
+            **fields,
+        }
     
-    reset_deadline()
-    
-    await sync_meili_docs({
-        'tika': does_support_mime_tika,
-        'whisper': does_support_mime_whisper
-    })
-    
-    await augment_meili_docs("tika", get_tika_fields)
-    await augment_meili_docs("whisper", get_whisper_fields, 1)
-    
-    logging.info("Done updating meilisearch docs.")
+        await add_or_update_doc_meili(doc)
+        logging.info(f'{module.NAME} did "{relative_path}"')
+        return True
+    except Exception as e:
+        logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
+        return False
+
+async def handle_file_path_augment_with_semaphore(file_path, semaphore, module):
+    async with semaphore:
+        return await augment_meili_doc_from_file_path(file_path, module)
      
-class MoveEventHandler(FileSystemEventHandler):
+class EventHandler(FileSystemEventHandler):
+    def __init__(self):
+        self.meili_client = Client(MEILISEARCH_HOST)
+        self.index = self.meili_client.index(INDEX_NAME)
+
+    def on_created(self, event):
+        if not event.is_directory:
+            try:
+                logging.info(f'created "{event.src_path}"')
+                self.create_or_update_meili(event.src_path)
+            except Exception as e:
+                logging.exception(f'failed to handle created event for "{event.src_path}": {e}')
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            try:
+                logging.info(f'modified "{event.src_path}"')
+                self.create_or_update_meili(event.src_path)
+            except Exception as e:
+                logging.exception(f'failed to handle modified event for "{event.src_path}": {e}')
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            try:
+                logging.info(f'deleted "{event.src_path}"')
+                self.delete_meili(event.src_path)
+            except Exception as e:
+                logging.exception(f'failed to handle deleted event for "{event.src_path}": {e}')
+
     def on_moved(self, event):
         if not event.is_directory:
-            watchdog_logger.info(f'move "{event.src_path}" to "{event.dest_path}"')
-            add_moved_file_path_db(event.src_path, event.dest_path)
+            try:
+                logging.info(f'moved "{event.src_path}" to "{event.dest_path}"')
+                self.delete_meili(event.src_path)
+                self.delete_meili(event.dest_path)
+                self.create_or_update_meili(event.dest_path)
+            except Exception as e:
+                logging.exception(f'failed to handle moved event from "{event.src_path}" to "{event.dest_path}": {e}')
+
+    def create_or_update_meili(self, file_path):
+        try:
+            _, document = create_meili_doc_from_file_path(file_path)
+            self.index.add_documents([document])
+            logging.info(f'Added/Updated "{file_path}" in index')
+        except Exception as e:
+            logging.exception(f'Failed to handle file "{file_path}": {e}')
+    
+    def delete_meili(self, file_path):
+        try:
+            id = get_meili_id_from_file_path(file_path)
+            self.index.delete_document(id)
+            logging.info(f'Deleted "{file_path}" from index')
+        except Exception as e:
+            logging.exception(f'Failed to delete file "{file_path}": {e}')
         
-async def process_main():
-    init_db()
-    observer = Observer()
-    handler = MoveEventHandler()
-    observer.schedule(handler, DIRECTORY_TO_INDEX, recursive=True)
-    observer.start()
+def process_main():
+    logger = logging.getLogger('watchdog')
+    logging.root = logger
+    logging.getLogger().handlers = logger.handlers
+
+    try:
+        logging.info(f'file move watchdog process started')
+        observer = Observer()
+        handler = EventHandler()
+        observer.schedule(handler, DIRECTORY_TO_INDEX, recursive=True)
+        observer.start()
+        observer.join()
+    except Exception as e:
+        logging.exception(f'failed to start the watchdog observer: {e}')
+    
+async def update_meili_docs():
+    await sync_meili_docs()
+    
+    logging.info(f'start file move watchdog process')
+    process = Process(target=process_main)
+    process.start()    
+    
+    for module in modules:
+        await augment_meili_docs(module)
            
 async def main():
-    init_db()
     await init_meili()
-    
-    process = Process(target=process_main)
-    process.start()
-    
     await update_meili_docs()
-    while True:
-        await sleep_until_3am()
-        await update_meili_docs()
 
 if __name__ == "__main__":
     asyncio.run(main())
