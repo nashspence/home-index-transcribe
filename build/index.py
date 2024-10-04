@@ -5,9 +5,10 @@ import logging
 import magic
 import os
 import mimetypes
+import time
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import time
+from datetime import time as datetime_time
 from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process
@@ -20,16 +21,20 @@ import whisper_module
 
 modules = [tika_module, whisper_module]
 
+# Ensure the data directory exists
+if not os.path.exists("./data/logs"):
+    os.makedirs("./data/logs")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         TimedRotatingFileHandler(
-            "./data/indexer.log",
+            "./data/logs/indexer.log",
             when="midnight",
             interval=1,
             backupCount=7,
-            atTime=time(2, 30)
+            atTime=datetime_time(2, 30)
         ),
         logging.StreamHandler(),
     ],
@@ -39,7 +44,7 @@ other_loggers = ['httpx', 'tika.tika', 'faster_whisper', 'watchdog']
 for logger_name in other_loggers:
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
-    file_handler = logging.FileHandler(f"./data/{logger_name}.log")
+    file_handler = logging.FileHandler(f"./data/logs/{logger_name}.log")
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(file_handler)
     logger.propagate = False 
@@ -179,7 +184,7 @@ async def get_all_pending_jobs(module):
                 filter=filter_query,
                 limit=limit,
                 offset=offset,
-                fields=["url", "mtime"]
+                fields=["url", "mtime", "type"]
             )
             docs.extend(response.results)
             if len(response.results) < limit:
@@ -322,51 +327,77 @@ def create_meili_doc_from_file_path(file_path, existing_docs = {}):
         logging.exception(f'failed to create meili doc for "{file_path}": {e}')
         return None
 
-async def augment_meili_docs(module):    
+async def augment_meili_docs(module):        
     try:
+        start_time = time.time()
         pending_jobs = await get_all_pending_jobs(module)
-        file_paths = [
-            get_file_path_from_meili_doc(doc)
+        file_paths_with_mime = [
+            [get_file_path_from_meili_doc(doc), doc['type']]
             for doc in sorted(pending_jobs, key=lambda x: x['mtime'], reverse=True)
         ]
     except Exception as e:
-        logging.exception(f"failed to file paths for {module.NAME}: {e}")
+        logging.exception(f"{module.NAME} failed to get pending: {e}")
         return
 
-    if not file_paths:
+    if not file_paths_with_mime:
         return
-
-    logging.info(f"do {len(file_paths)} meili docs with {module.NAME}")
-
-    semaphore = asyncio.Semaphore(module.MAX_WORKERS)
-    tasks = [asyncio.create_task(handle_file_path_augment_with_semaphore(fp, semaphore, module)) for fp in file_paths]
+    
+    logging.info(f"start {module.NAME} for {len(file_paths_with_mime)}")
+    
+    try:
+        logging.info(f"init {module.NAME}")
+        await module.init()
+    except Exception as e:
+        logging.exception(f"failed to init {module.NAME}: {e}")
+        return
 
     try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        success_count = 0
+        failure_count = 0
+        not_found_count = 0
+
+        for i in range(0, len(file_paths_with_mime), module.MAX_WORKERS):
+            batch = file_paths_with_mime[i:i + module.MAX_WORKERS]
+            
+            tasks = [
+                asyncio.create_task(augment_meili_doc_from_file_path(fp[0], fp[1], module))
+                for fp in batch
+            ]
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, Exception):
+                    failure_count += 1
+                    logging.exception(f"{module.NAME} file failed:", exc_info=result)
+                elif result is True:
+                    success_count += 1
+                elif result is False:
+                    failure_count += 1
+                elif result is None:
+                    not_found_count += 1
+
+            elapsed_time = time.time() - start_time
+            
+            if elapsed_time > 3600: 
+                logging.info(f"{module.NAME} yeilding")
+                break
+            
+        logging.info(
+            f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}"
+        )
     except Exception as e:
         logging.exception(f'{module.NAME} batch failed: {e}')
         return
+    
+    try:
+        logging.info(f"cleanup {module.NAME}")
+        await module.cleanup()
+    except Exception as e:
+        logging.exception(f"{module.NAME} failed to cleanup: {e}")
+        return
 
-    success_count = 0
-    failure_count = 0
-    not_found_count = 0
-
-    for result in results:
-        if isinstance(result, Exception):
-            failure_count += 1
-            logging.exception(f"{module.NAME} file failed:", exc_info=result)
-        elif result is True:
-            success_count += 1
-        elif result is False:
-            failure_count += 1
-        elif result is None:
-            not_found_count += 1
-
-    logging.info(
-        f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}"
-    )
-
-async def augment_meili_doc_from_file_path(file_path, module):    
+async def augment_meili_doc_from_file_path(file_path, mime, module):    
     path = Path(file_path)
     relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
 
@@ -377,10 +408,7 @@ async def augment_meili_doc_from_file_path(file_path, module):
         return None
 
     try:
-        if inspect.iscoroutinefunction(module.get_fields):
-            fields = await module.get_fields(file_path)
-        else:
-            fields = await asyncio.to_thread(module.get_fields, file_path)
+        fields = await module.get_fields(file_path, mime)
     except Exception as e:
         logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
         return False
@@ -402,10 +430,6 @@ async def augment_meili_doc_from_file_path(file_path, module):
     except Exception as e:
         logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
         return False
-
-async def handle_file_path_augment_with_semaphore(file_path, semaphore, module):
-    async with semaphore:
-        return await augment_meili_doc_from_file_path(file_path, module)
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
@@ -484,8 +508,10 @@ async def update_meili_docs():
     process = Process(target=process_main)
     process.start()    
     
-    for module in modules:
-        await augment_meili_docs(module)
+    while True:
+        for module in modules:
+            await augment_meili_docs(module)
+        asyncio.sleep(300)
            
 async def main():
     await init_meili()

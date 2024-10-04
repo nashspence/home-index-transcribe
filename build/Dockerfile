@@ -1,6 +1,6 @@
 # Dockerfile
 
-FROM python:3.9-slim
+FROM intel/intel-optimized-pytorch:2.4.0-idp-base
 
 RUN apt-get update && apt-get install -y \
     openjdk-17-jre-headless \
@@ -8,6 +8,9 @@ RUN apt-get update && apt-get install -y \
     libmagic1 \
     file \
     ffmpeg \
+    imagemagick \
+    poppler-utils \
+    libgomp1 \
     && apt-get clean
 
 ENV JAVA_HOME /usr/lib/jvm/java-17-openjdk-amd64
@@ -21,7 +24,12 @@ RUN pip install meilisearch_python_sdk \
     faster-whisper \
     ffmpeg-python \
     watchdog \
-    httpx
+    pdf2image \
+    easyocr \
+    numpy \
+    rawpy \
+    Pillow \
+    wand
 
 COPY index.py .
 COPY modules .

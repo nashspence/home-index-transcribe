@@ -1,5 +1,6 @@
 from tika import parser, config
 import json
+import asyncio
 
 tika_mimes = json.loads(config.getMimeTypes())
 
@@ -18,7 +19,13 @@ def does_support_mime(mime):
         if (mime.startswith("text/") or mime.startswith("application/")) and mime not in archive_mimes:
             return True
     return False    
+
+async def init():
+    return
+
+async def cleanup():
+    return
     
-def get_fields(file_path):
-    parsed = parser.from_file(file_path)
+async def get_fields(file_path, mime):
+    parsed = await asyncio.to_thread(parser.from_file, file_path)
     return { "text": parsed.get("content", "") }
