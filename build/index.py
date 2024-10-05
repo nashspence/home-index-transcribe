@@ -36,14 +36,21 @@ logging.basicConfig(
     ],
 )
 
-other_loggers = ['httpx', 'tika.tika', 'faster_whisper', 'watchdog'] 
+other_loggers = ['httpx', 'tika.tika', 'faster_whisper'] 
 for logger_name in other_loggers:
     logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.WARNING)
     file_handler = logging.FileHandler(f"./data/logs/{logger_name}.log")
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(file_handler)
     logger.propagate = False
+    
+logger = logging.getLogger('watchdog')
+logger.setLevel(logging.INFO)
+file_handler = logging.FileHandler(f"./data/logs/watchdog.log")
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(file_handler)
+logger.propagate = False
 
 ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "900"))
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
@@ -390,7 +397,7 @@ async def augment_meili_docs(module):
                     not_found.append(file_path)
             except asyncio.CancelledError:
                 postponed.append(file_path)
-            except Exception as e:
+            except Exception:
                 logging.exception( f"{module.NAME} failed at {file_path}")
                 failure.append(file_path)
          
@@ -408,7 +415,7 @@ async def augment_meili_docs(module):
     try:
         logging.debug(f"{module.NAME} cleanup")
         await module.cleanup()
-    except Exception as e:
+    except Exception:
         logging.exception(f"{module.NAME} cleanup failed")
         return
 
@@ -452,7 +459,7 @@ class EventHandler(FileSystemEventHandler):
             try:
                 logging.info(f'create "{event.src_path}"')
                 self.create_or_update_meili(event.src_path)
-            except Exception as e:
+            except Exception:
                 logging.exception(f'create failed "{event.src_path}"')
 
     def on_modified(self, event):
@@ -461,7 +468,7 @@ class EventHandler(FileSystemEventHandler):
                 logging.info(f'modify "{event.src_path}"')
                 self.delete_meili(event.src_path)
                 self.create_or_update_meili(event.src_path)
-            except Exception as e:
+            except Exception:
                 logging.exception(f'modify failed "{event.src_path}"')
 
     def on_deleted(self, event):
@@ -469,7 +476,7 @@ class EventHandler(FileSystemEventHandler):
             try:
                 logging.info(f'delete "{event.src_path}"')
                 self.delete_meili(event.src_path)
-            except Exception as e:
+            except Exception:
                 logging.exception(f'delete failed "{event.src_path}"')
 
     def on_moved(self, event):
@@ -479,25 +486,16 @@ class EventHandler(FileSystemEventHandler):
                 self.delete_meili(event.src_path)
                 self.delete_meili(event.dest_path)
                 self.create_or_update_meili(event.dest_path)
-            except Exception as e:
-                logging.exception(f'move failed "{event.src_path}" to "{event.dest_path}"')
+            except Exception:
+                logging.exception(f'move failed "{event.src_path}" -> "{event.dest_path}"')
 
     def create_or_update_meili(self, file_path):
-        try:
-            logging.debug(f'meili add/update "{file_path}"')
-            fp, document, status = create_meili_doc_from_file_path(file_path)
-            self.index.add_documents([document])
-        except Exception as e:
-            logging.exception(f'meili add/update failed "{file_path}"')
-    
+        fp, document, status = create_meili_doc_from_file_path(file_path)
+        self.index.add_documents([document])
+
     def delete_meili(self, file_path):
-        try:
-            logging.debug(f'meili delete "{file_path}"')
-            id = get_meili_id_from_file_path(file_path)
-            self.index.delete_document(id)
-            logging.info(f'deleted "{file_path}" from index')
-        except Exception as e:
-            logging.exception(f'meili delete failed "{file_path}"')
+        id = get_meili_id_from_file_path(file_path)
+        self.index.delete_document(id)
         
 def process_main():
     logger = logging.getLogger('watchdog')
@@ -511,7 +509,7 @@ def process_main():
         observer.schedule(handler, OS_DIRECTORY_TO_INDEX, recursive=True)
         observer.start()
         observer.join()
-    except Exception as e:
+    except Exception:
         logging.exception(f'watchdog init failed')
     
 async def update_meili_docs():
