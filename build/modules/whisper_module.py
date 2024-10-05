@@ -66,7 +66,7 @@ async def get_fields(file_path, doc):
         last_end_time = 0
         
         if len(audio_transcript_segments) > 0:
-            logging.info(f'whisper from {last_end_time} "{file_path}"')
+            logging.debug(f'whisper from {last_end_time} "{file_path}"')
             last_end_time = audio_transcript_segments[-1]["end"]
 
         temp_file = generate_temp_file_name(file_path)
@@ -74,13 +74,13 @@ async def get_fields(file_path, doc):
 
         segments = transcribe(temp_file)
 
-        logging.info(f'whisper {last_end_time} "{file_path}"')
+        logging.debug(f'whisper {last_end_time} "{file_path}"')
         for segment in segments:
             adjusted_start = segment.start + last_end_time
             adjusted_end = segment.end + last_end_time
             audio_transcript += segment.text + " "
             audio_transcript_segments.append({'start': adjusted_start, 'end': adjusted_end, 'text': segment.text})
-            logging.info(f'whisper {adjusted_end} "{file_path}"')
+            logging.debug(f'whisper {adjusted_end} "{file_path}"')
             yield {
                 "audio_transcript": audio_transcript,
                 "audio_transcript_segments": audio_transcript_segments

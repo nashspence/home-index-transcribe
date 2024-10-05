@@ -1,14 +1,11 @@
+import os
+import logging
 import asyncio
 import hashlib
-import inspect
-import logging
 import magic
-import os
 import mimetypes
-import time
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import time as datetime_time
+from datetime import time
 from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process
@@ -21,7 +18,6 @@ import whisper_module
 
 modules = [tika_module, whisper_module]
 
-# Ensure the data directory exists
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
 
@@ -34,7 +30,7 @@ logging.basicConfig(
             when="midnight",
             interval=1,
             backupCount=7,
-            atTime=datetime_time(2, 30)
+            atTime=time(2, 30)
         ),
         logging.StreamHandler(),
     ],
@@ -47,118 +43,119 @@ for logger_name in other_loggers:
     file_handler = logging.FileHandler(f"./data/logs/{logger_name}.log")
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(file_handler)
-    logger.propagate = False 
+    logger.propagate = False
 
-DIRECTORY_TO_INDEX = os.environ.get("DIRECTORY_TO_INDEX", "/data")
-MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
-INDEX_NAME = os.environ.get("INDEX_NAME", "files")
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "900"))
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "10000"))
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "32"))
+MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
+MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
+MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
+OS_DIRECTORY_TO_INDEX = os.environ.get("OS_DIRECTORY_TO_INDEX", "/data")
 SLEEP_BETWEEN_MODULE_RUNS = int(os.environ.get("SLEEP_BETWEEN_MODULE_RUNS", "300"))
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOW_TIME_PER_MODULE", "900"))
 
 client = None
 index = None
 
 async def init_meili():
     global client, index
+    logging.debug(f"meili init")
     client = AsyncClient(MEILISEARCH_HOST)
     try:
-        index = await client.get_index(INDEX_NAME)
+        index = await client.get_index(MEILISEARCH_INDEX_NAME)
     except Exception as e:
         if getattr(e, 'code', None) == "index_not_found":
             try:
-                logging.info(f"Creating MeiliSearch index '{INDEX_NAME}'.")
-                index = await client.create_index(INDEX_NAME, primary_key="id")
-            except Exception as create_e:
-                logging.error(f"Failed to create MeiliSearch index '{INDEX_NAME}': {create_e.message}")
+                logging.info(f'meili create index "{MEILISEARCH_INDEX_NAME}"')
+                index = await client.create_index(MEILISEARCH_INDEX_NAME, primary_key="id")
+            except Exception:
+                logging.exception(f'meile create index failed "{MEILISEARCH_INDEX_NAME}"')
                 raise
         else:
-            logging.error(f"Failed to initialize MeiliSearch: {e.message}")
+            logging.exception(f"meili init failed")
             raise
 
     filterable_attributes = ["id"] + [module.FIELD_NAME for module in modules]
     
     try:
+        logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
         await index.update_sortable_attributes(["mtime"])
-    except Exception as attr_e:
-        logging.error(f"Failed to update index attributes: {attr_e}")
+    except Exception:
+        logging.exception(f"meili update index attrs failed")
         raise
 
 async def get_doc_count_meili():
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     try:
         stats = await index.get_stats()
         return stats.number_of_documents
-    except Exception as e:
-        logging.error(f"Failed to get MeiliSearch index stats: {e}")
+    except Exception:
+        logging.exception(f"meili get stats failed")
         raise
 
 async def add_or_update_doc_meili(doc, wait_for_task=False):
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     if doc:
         try:
             task = await index.update_documents([doc])
             if wait_for_task:
                 await wait_for_task_completion_meili(task)
-        except Exception as e:
-            logging.error(f"Failed to add or update MeiliSearch document: {e}")
+        except Exception:
+            logging.exception(f"meili update documents failed")
             raise
 
 async def add_or_update_docs_meili(docs, wait_for_task=False):
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     if docs:
         try:
-            for i in range(0, len(docs), BATCH_SIZE):
-                batch = docs[i:i + BATCH_SIZE]
+            for i in range(0, len(docs), MEILISEARCH_BATCH_SIZE):
+                batch = docs[i:i + MEILISEARCH_BATCH_SIZE]
                 task = await index.update_documents(batch)
                 if wait_for_task:
                     await wait_for_task_completion_meili(task)
-        except Exception as e:
-            logging.error(f"Failed to add/update MeiliSearch documents: {e}")
+        except Exception:
+            logging.exception(f"meili update documents failed")
             raise
 
 async def delete_docs_by_id_meili(ids, wait_for_task=False):
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     try:
         if ids:
-            for i in range(0, len(ids), BATCH_SIZE):
-                batch = ids[i:i + BATCH_SIZE]
+            for i in range(0, len(ids), MEILISEARCH_BATCH_SIZE):
+                batch = ids[i:i + MEILISEARCH_BATCH_SIZE]
                 task = await index.delete_documents(ids=batch)
                 if wait_for_task:
                     await wait_for_task_completion_meili(task)
-    except Exception as e:
-        logging.error(f"Failed to delete MeiliSearch documents by ID: {e}")
+    except Exception:
+        logging.exception(f"meili delete documents failed")
         raise
 
 async def get_doc_meili(doc_id):
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     try:
         doc = await index.get_document(doc_id)
         return doc
-    except Exception as e:
-        logging.error(f"Failed to get MeiliSearch document with ID {doc_id}: {e}")
+    except Exception:
+        logging.exception(f"meili get document failed")
         raise
 
 async def get_all_docs_meili():
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     docs = []
     offset = 0
-    limit = BATCH_SIZE
+    limit = MEILISEARCH_BATCH_SIZE
     try:
         while True:
             result = await index.get_documents(offset=offset, limit=limit)
@@ -167,17 +164,17 @@ async def get_all_docs_meili():
                 break
             offset += limit
         return docs
-    except Exception as e:
-        logging.error(f"Failed to retrieve all MeiliSearch documents: {e}")
+    except Exception:
+        logging.exception(f"meili get documents failed")
         raise
 
 async def get_all_pending_jobs(module):
     if not index:
-        raise Exception("MeiliSearch index is not initialized.")
+        raise Exception("meili index did not init")
     
     docs = []
     offset = 0
-    limit = BATCH_SIZE
+    limit = MEILISEARCH_BATCH_SIZE
     filter_query = f'{module.FIELD_NAME} < {module.VERSION}'
     fields = ["url", "mtime", "type"] + module.DATA_FIELD_NAMES
     
@@ -194,13 +191,13 @@ async def get_all_pending_jobs(module):
                 break
             offset += limit
         return docs
-    except Exception as e:
-        logging.error(f"Failed to get pending jobs from MeiliSearch: {e}")
+    except Exception:
+        logging.exception(f"meili get documents failed")
         raise
 
 async def wait_for_task_completion_meili(task_info):
     if not client:
-        raise Exception("MeiliSearch client is not initialized.")
+        raise Exception("meili index did not init")
     
     try:
         while True:
@@ -208,10 +205,10 @@ async def wait_for_task_completion_meili(task_info):
             if task.status == 'succeeded':
                 return
             elif task.status == 'failed':
-                raise Exception("MeiliSearch task failed!")
+                raise Exception(f"meili task failed {str(task_info)}")
             await asyncio.sleep(0.5)
-    except Exception as e:
-        logging.error(f"Error while waiting for task completion: {e}")
+    except Exception:
+        logging.exception(f"meili get task failed")
         raise
 
 def get_mime_magic(file_path):
@@ -233,7 +230,7 @@ def get_meili_id_from_file_path(file_path):
     return get_meili_id_from_relative_path(get_relative_path_from_file_path(file_path))
 
 def get_file_path_from_meili_doc(doc):
-    return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{DIRECTORY_TO_INDEX}/")).as_posix()
+    return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{OS_DIRECTORY_TO_INDEX}/")).as_posix()
 
 def get_relative_path_from_meili_doc(doc):
     return Path(doc['url'].replace(f"https://{DOMAIN}/", "")).as_posix()
@@ -242,27 +239,25 @@ def get_url_from_relative_path(relative_path):
     return f"https://{DOMAIN}/{relative_path}"
 
 def get_relative_path_from_file_path(file_path):
-    return Path(file_path).relative_to(DIRECTORY_TO_INDEX).as_posix()
+    return Path(file_path).relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
 
 async def sync_meili_docs():
-    logging.info("sync meili docs with files")
-
     all_docs = await get_all_docs_meili()
     existing_meili_file_paths = set()
     existing_docs = {}
     
-    logging.info(f"{len(all_docs)} meili docs exist")
+    logging.info(f"meili {len(all_docs)} indexed")
 
     for doc in all_docs:
         file_path = get_file_path_from_meili_doc(doc)
         existing_meili_file_paths.add(file_path)
         existing_docs[doc["id"]] = doc
 
-    directories_to_scan = [DIRECTORY_TO_INDEX]
+    directories_to_scan = [OS_DIRECTORY_TO_INDEX]
     updated = []
     exists = set()
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=32) as executor:
         futures = []
 
         while directories_to_scan:
@@ -274,8 +269,8 @@ async def sync_meili_docs():
                             directories_to_scan.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             futures.append(executor.submit(create_meili_doc_from_file_path, entry.path, existing_docs))
-            except Exception as e:
-                logging.exception(f'failed to scan directory "{dir_path}": {e}')
+            except Exception:
+                logging.exception(f'os scan directory failed "{dir_path}"')
 
         for future in as_completed(futures):
             result = future.result()
@@ -293,14 +288,14 @@ async def sync_meili_docs():
     
     doc_count = await get_doc_count_meili()
     
-    logging.info(f"{len(deleted_meili_ids)} meili docs deleted")
-    logging.info(f"{len(updated)} meili docs created/updated")
-    logging.info(f"{doc_count} meili docs now exist")
+    logging.info(f"meili deleted {len(deleted_meili_ids)} docs")
+    logging.info(f"meili created/updated {len(updated)}")
+    logging.info(f"meili {doc_count} docs now indexed")
 
 def create_meili_doc_from_file_path(file_path, existing_docs = {}):
     try:
         path = Path(file_path)
-        relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
+        relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
         stat = path.stat()
 
         current_mtime = stat.st_mtime
@@ -331,31 +326,32 @@ def create_meili_doc_from_file_path(file_path, existing_docs = {}):
                     document[module.FIELD_NAME] = 0
 
         return (file_path, document, status)
-    except Exception as e:
-        logging.exception(f'failed to create meili doc for "{file_path}": {e}')
+    except Exception:
+        logging.exception(f'os create doc failed "{file_path}"')
         return None
 
 async def augment_meili_docs(module):
     try:
+        logging.debug(f"{module.NAME} get pending files")
         pending_jobs = await get_all_pending_jobs(module)
         file_paths_with_mime = [
             [get_file_path_from_meili_doc(doc), doc]
             for doc in sorted(pending_jobs, key=lambda x: x['mtime'], reverse=True)
         ]
-    except Exception as e:
-        logging.exception(f"{module.NAME} failed to get pending: {e}")
+    except Exception:
+        logging.exception(f"{module.NAME} failed to get pending files")
         return
 
     if not file_paths_with_mime:
         return
 
-    logging.info(f"start {module.NAME} for {len(file_paths_with_mime)}")
+    logging.info(f"{module.NAME} start for {len(file_paths_with_mime)} files")
 
     try:
-        logging.info(f"init {module.NAME}")
+        logging.debug(f"init {module.NAME}")
         await module.init()
-    except Exception as e:
-        logging.exception(f"failed to init {module.NAME}: {e}")
+    except Exception:
+        logging.exception(f"{module.NAME} init failed")
         return
 
     try:
@@ -364,165 +360,144 @@ async def augment_meili_docs(module):
         async def sem_task(fp):
             async with semaphore:
                 return await augment_meili_doc_from_file_path(fp[0], fp[1], module)
+            
+        tasks_dict = {}
+        tasks_list = []
 
-        start_time = time.time()
-        tasks = [asyncio.create_task(sem_task(fp)) for fp in file_paths_with_mime]
+        for fp in file_paths_with_mime:
+            task = asyncio.create_task(sem_task(fp))
+            tasks_dict[fp[0]] = task
+            tasks_list.append(task)
         
-        for fut in asyncio.as_completed(tasks):
-            try:
-                await fut        
-                elapsed_time = time.time() - start_time
-                if elapsed_time > ALLOWED_TIME_PER_MODULE:
-                    logging.info(f"{module.NAME} yielding time to other modules")
-                    for task in tasks:
-                        task.cancel()
-                    break
-            except Exception as e:
-                logging.exception(f"{module.NAME} file failed:", exc_info=e)
+        _, postponed_tasks = await asyncio.wait(tasks_list, timeout=ALLOWED_TIME_PER_MODULE)
         
-        success_count = 0
-        failure_count = 0
-        not_found_count = 0
-        postponed_count = 0
-        
-        for task in tasks:
+        if len(postponed_tasks) > 0:
+            logging.info(f"{module.NAME} will yield")
+            for postponed_task in postponed_tasks:
+                postponed_task.cancel()
+            
+        success = []
+        failure = []
+        not_found = []
+        postponed = []
+            
+        for file_path, task in tasks_dict.items():
             try:
                 result = await task
-                if result == 0:
-                    success_count += 1
-                elif result == 1:
-                    failure_count += 1
-                elif result == 2:
-                    not_found_count += 1
-                elif result == 3:
-                    postponed_count += 1
+                if result == "success":
+                    success.append(file_path)
+                elif result == "not found":
+                    not_found.append(file_path)
             except asyncio.CancelledError:
-                postponed_count += 1
+                postponed.append(file_path)
             except Exception as e:
-                failure_count += 1
-            
-        logging.info(
-            f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}, postponed={postponed_count}"
-        )
-    except Exception as e:
-        logging.exception(f'{module.NAME} batch failed: {e}')
-        return
+                logging.exception( f"{module.NAME} failed at {file_path}")
+                failure.append(file_path)
+         
+        if len(success) > 0:
+            logging.info( f"{module.NAME} {len(success)} files succeeded")
+        if len(postponed) > 0:
+            logging.info( f"{module.NAME} {len(postponed)} files postponed")
+        if len(not_found) > 0:
+            logging.warning( f"{module.NAME} {len(not_found)} files not found")
+        if len(failure) > 0:
+            logging.error( f"{module.NAME} {len(failure)} files failed")
+    except Exception:
+        logging.exception(f'{module.NAME} failed')
 
     try:
-        logging.info(f"cleanup {module.NAME}")
+        logging.debug(f"{module.NAME} cleanup")
         await module.cleanup()
     except Exception as e:
-        logging.exception(f"{module.NAME} failed to cleanup: {e}")
+        logging.exception(f"{module.NAME} cleanup failed")
         return
 
 async def augment_meili_doc_from_file_path(file_path, doc, module):    
     path = Path(file_path)
-    relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
-
-    logging.info(f'{module.NAME} trying "{relative_path}"')
+    relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
+    
+    logging.debug(f'{module.NAME} start "{relative_path}"')
+    
+    id = get_meili_id_from_relative_path(relative_path)
 
     if not path.exists():
-        logging.error(f'{module.NAME} failed "{relative_path}": not found')
-        return 2
+        return "not found"
 
-    start_time = time.monotonic()
-    time_limit = ALLOWED_TIME_PER_MODULE
-
-    try:
-        async for fields in module.get_fields(file_path, doc):
-            if not path.exists():
-                logging.error(f'{module.NAME} failed "{relative_path}": not found after processing')
-                return 2
-            
-            current_time = time.monotonic()
-            elapsed_time = current_time - start_time
-            
-            try:
-                updated_doc = {
-                    "id": get_meili_id_from_relative_path(relative_path),
-                    **fields,
-                }
-                
-                await add_or_update_doc_meili(updated_doc)
-            except Exception as e:
-                logging.exception(f'{module.NAME} failed to update "{relative_path}": {e}')
-                return 1
-            
-            if elapsed_time > time_limit:
-                logging.info(f'{module.NAME} postponing "{relative_path}"')
-                return 3
+    async for fields in module.get_fields(file_path, doc):
+        if not path.exists():
+            return "not found"
         
-        try:
-            updated_doc = {
-                "id": get_meili_id_from_relative_path(relative_path),
-                f'{module.FIELD_NAME}': module.VERSION,
-            }
-            
-            await add_or_update_doc_meili(updated_doc)
-        except Exception as e:
-            logging.exception(f'{module.NAME} failed to update "{relative_path}": {e}')
-            return 1    
+        updated_doc = {
+            "id": id,
+            **fields,
+        }
         
-        return 0
-    except Exception as e:
-        logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
-        return 1
+        await add_or_update_doc_meili(updated_doc)
+        
+    updated_doc = {
+        "id": id,
+        f'{module.FIELD_NAME}': module.VERSION,
+    }
+    
+    await add_or_update_doc_meili(updated_doc)
+    return "success"
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
         self.meili_client = Client(MEILISEARCH_HOST)
-        self.index = self.meili_client.index(INDEX_NAME)
+        self.index = self.meili_client.index(MEILISEARCH_INDEX_NAME)
 
     def on_created(self, event):
         if not event.is_directory:
             try:
-                logging.info(f'created "{event.src_path}"')
+                logging.info(f'create "{event.src_path}"')
                 self.create_or_update_meili(event.src_path)
             except Exception as e:
-                logging.exception(f'failed to handle created event for "{event.src_path}": {e}')
+                logging.exception(f'create failed "{event.src_path}"')
 
     def on_modified(self, event):
         if not event.is_directory:
             try:
-                logging.info(f'modified "{event.src_path}"')
+                logging.info(f'modify "{event.src_path}"')
                 self.delete_meili(event.src_path)
                 self.create_or_update_meili(event.src_path)
             except Exception as e:
-                logging.exception(f'failed to handle modified event for "{event.src_path}": {e}')
+                logging.exception(f'modify failed "{event.src_path}"')
 
     def on_deleted(self, event):
         if not event.is_directory:
             try:
-                logging.info(f'deleted "{event.src_path}"')
+                logging.info(f'delete "{event.src_path}"')
                 self.delete_meili(event.src_path)
             except Exception as e:
-                logging.exception(f'failed to handle deleted event for "{event.src_path}": {e}')
+                logging.exception(f'delete failed "{event.src_path}"')
 
     def on_moved(self, event):
         if not event.is_directory:
             try:
-                logging.info(f'moved "{event.src_path}" to "{event.dest_path}"')
+                logging.info(f'move "{event.src_path}" -> "{event.dest_path}"')
                 self.delete_meili(event.src_path)
                 self.delete_meili(event.dest_path)
                 self.create_or_update_meili(event.dest_path)
             except Exception as e:
-                logging.exception(f'failed to handle moved event from "{event.src_path}" to "{event.dest_path}": {e}')
+                logging.exception(f'move failed "{event.src_path}" to "{event.dest_path}"')
 
     def create_or_update_meili(self, file_path):
         try:
+            logging.debug(f'meili add/update "{file_path}"')
             fp, document, status = create_meili_doc_from_file_path(file_path)
             self.index.add_documents([document])
-            logging.info(f'Added/Updated "{file_path}" in index')
         except Exception as e:
-            logging.exception(f'Failed to handle file "{file_path}": {e}')
+            logging.exception(f'meili add/update failed "{file_path}"')
     
     def delete_meili(self, file_path):
         try:
+            logging.debug(f'meili delete "{file_path}"')
             id = get_meili_id_from_file_path(file_path)
             self.index.delete_document(id)
-            logging.info(f'Deleted "{file_path}" from index')
+            logging.info(f'deleted "{file_path}" from index')
         except Exception as e:
-            logging.exception(f'Failed to delete file "{file_path}": {e}')
+            logging.exception(f'meili delete failed "{file_path}"')
         
 def process_main():
     logger = logging.getLogger('watchdog')
@@ -530,26 +505,26 @@ def process_main():
     logging.getLogger().handlers = logger.handlers
 
     try:
-        logging.info(f'file move watchdog process started')
+        logging.info(f'watchdog init')
         observer = Observer()
         handler = EventHandler()
-        observer.schedule(handler, DIRECTORY_TO_INDEX, recursive=True)
+        observer.schedule(handler, OS_DIRECTORY_TO_INDEX, recursive=True)
         observer.start()
         observer.join()
     except Exception as e:
-        logging.exception(f'failed to start the watchdog observer: {e}')
+        logging.exception(f'watchdog init failed')
     
 async def update_meili_docs():
     await sync_meili_docs()
     
-    logging.info(f'start file move watchdog process')
+    logging.info(f'start watchdog process')
     process = Process(target=process_main)
     process.start()    
     
     while True:
         for module in modules:
             await augment_meili_docs(module)
-        logging.info(f'waiting for next module cycle')
+        logging.info(f'wait for next cycle')
         await asyncio.sleep(SLEEP_BETWEEN_MODULE_RUNS)
            
 async def main():
