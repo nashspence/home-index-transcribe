@@ -337,7 +337,6 @@ def create_meili_doc_from_file_path(file_path, existing_docs = {}):
 
 async def augment_meili_docs(module):
     try:
-        start_time = time.time()
         pending_jobs = await get_all_pending_jobs(module)
         file_paths_with_mime = [
             [get_file_path_from_meili_doc(doc), doc]
@@ -360,30 +359,36 @@ async def augment_meili_docs(module):
         return
 
     try:
-        success_count = 0
-        failure_count = 0
-        not_found_count = 0
-        postponed_count = 0
-
         semaphore = asyncio.Semaphore(module.MAX_WORKERS)
 
         async def sem_task(fp):
             async with semaphore:
-                try:
-                    return await augment_meili_doc_from_file_path(fp[0], fp[1], module)
-                except Exception as e:
-                    return e
+                return await augment_meili_doc_from_file_path(fp[0], fp[1], module)
 
+        start_time = time.time()
         tasks = [asyncio.create_task(sem_task(fp)) for fp in file_paths_with_mime]
-
+        
         for fut in asyncio.as_completed(tasks):
             try:
-                result = await fut
-                
-                if isinstance(result, Exception):
-                    failure_count += 1
-                    logging.exception(f"{module.NAME} file failed:", exc_info=result)
-                elif result == 0:
+                await fut        
+                elapsed_time = time.time() - start_time
+                if elapsed_time > ALLOWED_TIME_PER_MODULE:
+                    logging.info(f"{module.NAME} yielding time to other modules")
+                    for task in tasks:
+                        task.cancel()
+                    break
+            except Exception as e:
+                logging.exception(f"{module.NAME} file failed:", exc_info=e)
+        
+        success_count = 0
+        failure_count = 0
+        not_found_count = 0
+        postponed_count = 0
+        
+        for task in tasks:
+            try:
+                result = await task
+                if result == 0:
                     success_count += 1
                 elif result == 1:
                     failure_count += 1
@@ -391,21 +396,11 @@ async def augment_meili_docs(module):
                     not_found_count += 1
                 elif result == 3:
                     postponed_count += 1
-                    
-                elapsed_time = time.time() - start_time
-                
-                if elapsed_time > ALLOWED_TIME_PER_MODULE:
-                    logging.info(f"{module.NAME} yielding time to other modules")
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
             except asyncio.CancelledError:
                 postponed_count += 1
-                pass
             except Exception as e:
                 failure_count += 1
-                logging.exception(f"{module.NAME} file failed:", exc_info=e)
-
+            
         logging.info(
             f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}, postponed={postponed_count}"
         )
