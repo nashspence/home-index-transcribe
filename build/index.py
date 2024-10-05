@@ -55,6 +55,8 @@ INDEX_NAME = os.environ.get("INDEX_NAME", "files")
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "10000"))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "32"))
+SLEEP_BETWEEN_MODULE_RUNS = int(os.environ.get("SLEEP_BETWEEN_MODULE_RUNS", "300"))
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOW_TIME_PER_MODULE", "900"))
 
 client = None
 index = None
@@ -177,6 +179,7 @@ async def get_all_pending_jobs(module):
     offset = 0
     limit = BATCH_SIZE
     filter_query = f'{module.FIELD_NAME} < {module.VERSION}'
+    fields = ["url", "mtime", "type"] + module.DATA_FIELD_NAMES
     
     try:
         while True:
@@ -184,7 +187,7 @@ async def get_all_pending_jobs(module):
                 filter=filter_query,
                 limit=limit,
                 offset=offset,
-                fields=["url", "mtime", "type"]
+                fields=fields
             )
             docs.extend(response.results)
             if len(response.results) < limit:
@@ -277,17 +280,16 @@ async def sync_meili_docs():
         for future in as_completed(futures):
             result = future.result()
             if result:
-                file_path, document = result
-                exists.add(file_path)
+                file_path, document, status = result
                 updated.append(document)
+                if status != "modified":
+                    exists.add(file_path)
 
     deleted = existing_meili_file_paths - exists
     deleted_meili_ids = [get_meili_id_from_file_path(file_path) for file_path in deleted]
 
-    await asyncio.gather(
-        delete_docs_by_id_meili(deleted_meili_ids, wait_for_task=True),
-        add_or_update_docs_meili(updated, wait_for_task=True)
-    )
+    await delete_docs_by_id_meili(deleted_meili_ids, wait_for_task=True),
+    await add_or_update_docs_meili(updated, wait_for_task=True)
     
     doc_count = await get_doc_count_meili()
     
@@ -305,6 +307,13 @@ def create_meili_doc_from_file_path(file_path, existing_docs = {}):
 
         mime = get_mime_magic(path)
         doc_id = get_meili_id_from_relative_path(relative_path)
+        
+        status = "new"    
+        if doc_id in existing_docs:
+            if existing_docs[doc_id]["mtime"] < current_mtime:
+                status = "modified"
+            else:
+                status = "same"
 
         document = {
             "id": doc_id,
@@ -318,21 +327,20 @@ def create_meili_doc_from_file_path(file_path, existing_docs = {}):
 
         for module in modules:
             if module.does_support_mime(mime):
-                existing_doc = existing_docs.get(doc_id, {})
-                if not existing_doc.get(module.FIELD_NAME):
+                if status == "modified" or status == "new":
                     document[module.FIELD_NAME] = 0
 
-        return (file_path, document)
+        return (file_path, document, status)
     except Exception as e:
         logging.exception(f'failed to create meili doc for "{file_path}": {e}')
         return None
 
-async def augment_meili_docs(module):        
+async def augment_meili_docs(module):
     try:
         start_time = time.time()
         pending_jobs = await get_all_pending_jobs(module)
         file_paths_with_mime = [
-            [get_file_path_from_meili_doc(doc), doc['type']]
+            [get_file_path_from_meili_doc(doc), doc]
             for doc in sorted(pending_jobs, key=lambda x: x['mtime'], reverse=True)
         ]
     except Exception as e:
@@ -341,9 +349,9 @@ async def augment_meili_docs(module):
 
     if not file_paths_with_mime:
         return
-    
+
     logging.info(f"start {module.NAME} for {len(file_paths_with_mime)}")
-    
+
     try:
         logging.info(f"init {module.NAME}")
         await module.init()
@@ -355,41 +363,56 @@ async def augment_meili_docs(module):
         success_count = 0
         failure_count = 0
         not_found_count = 0
+        postponed_count = 0
 
-        for i in range(0, len(file_paths_with_mime), module.MAX_WORKERS):
-            batch = file_paths_with_mime[i:i + module.MAX_WORKERS]
-            
-            tasks = [
-                asyncio.create_task(augment_meili_doc_from_file_path(fp[0], fp[1], module))
-                for fp in batch
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for result in results:
+        semaphore = asyncio.Semaphore(module.MAX_WORKERS)
+
+        async def sem_task(fp):
+            async with semaphore:
+                try:
+                    return await augment_meili_doc_from_file_path(fp[0], fp[1], module)
+                except Exception as e:
+                    return e
+
+        tasks = [asyncio.create_task(sem_task(fp)) for fp in file_paths_with_mime]
+
+        for fut in asyncio.as_completed(tasks):
+            try:
+                result = await fut
+                
                 if isinstance(result, Exception):
                     failure_count += 1
                     logging.exception(f"{module.NAME} file failed:", exc_info=result)
-                elif result is True:
+                elif result == 0:
                     success_count += 1
-                elif result is False:
+                elif result == 1:
                     failure_count += 1
-                elif result is None:
+                elif result == 2:
                     not_found_count += 1
+                elif result == 3:
+                    postponed_count += 1
+                    
+                elapsed_time = time.time() - start_time
+                
+                if elapsed_time > ALLOWED_TIME_PER_MODULE:
+                    logging.info(f"{module.NAME} yielding time to other modules")
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+            except asyncio.CancelledError:
+                postponed_count += 1
+                pass
+            except Exception as e:
+                failure_count += 1
+                logging.exception(f"{module.NAME} file failed:", exc_info=e)
 
-            elapsed_time = time.time() - start_time
-            
-            if elapsed_time > 3600: 
-                logging.info(f"{module.NAME} yeilding")
-                break
-            
         logging.info(
-            f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}"
+            f"{module.NAME}: success={success_count}, fail={failure_count}, not_found={not_found_count}, postponed={postponed_count}"
         )
     except Exception as e:
         logging.exception(f'{module.NAME} batch failed: {e}')
         return
-    
+
     try:
         logging.info(f"cleanup {module.NAME}")
         await module.cleanup()
@@ -397,7 +420,7 @@ async def augment_meili_docs(module):
         logging.exception(f"{module.NAME} failed to cleanup: {e}")
         return
 
-async def augment_meili_doc_from_file_path(file_path, mime, module):    
+async def augment_meili_doc_from_file_path(file_path, doc, module):    
     path = Path(file_path)
     relative_path = path.relative_to(DIRECTORY_TO_INDEX).as_posix()
 
@@ -405,31 +428,50 @@ async def augment_meili_doc_from_file_path(file_path, mime, module):
 
     if not path.exists():
         logging.error(f'{module.NAME} failed "{relative_path}": not found')
-        return None
+        return 2
+
+    start_time = time.monotonic()
+    time_limit = ALLOWED_TIME_PER_MODULE
 
     try:
-        fields = await module.get_fields(file_path, mime)
+        async for fields in module.get_fields(file_path, doc):
+            if not path.exists():
+                logging.error(f'{module.NAME} failed "{relative_path}": not found after processing')
+                return 2
+            
+            current_time = time.monotonic()
+            elapsed_time = current_time - start_time
+            
+            try:
+                updated_doc = {
+                    "id": get_meili_id_from_relative_path(relative_path),
+                    **fields,
+                }
+                
+                await add_or_update_doc_meili(updated_doc)
+            except Exception as e:
+                logging.exception(f'{module.NAME} failed to update "{relative_path}": {e}')
+                return 1
+            
+            if elapsed_time > time_limit:
+                logging.info(f'{module.NAME} postponing "{relative_path}"')
+                return 3
+        
+        try:
+            updated_doc = {
+                "id": get_meili_id_from_relative_path(relative_path),
+                f'{module.FIELD_NAME}': module.VERSION,
+            }
+            
+            await add_or_update_doc_meili(updated_doc)
+        except Exception as e:
+            logging.exception(f'{module.NAME} failed to update "{relative_path}": {e}')
+            return 1    
+        
+        return 0
     except Exception as e:
         logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
-        return False
-    
-    if not path.exists():
-        logging.error(f'{module.NAME} failed "{relative_path}": not found after processing')
-        return None
-
-    try:
-        doc = {
-            "id": get_meili_id_from_relative_path(relative_path),
-            f'{module.FIELD_NAME}': module.VERSION,
-            **fields,
-        }
-    
-        await add_or_update_doc_meili(doc)
-        logging.info(f'{module.NAME} did "{relative_path}"')
-        return True
-    except Exception as e:
-        logging.exception(f'{module.NAME} failed "{relative_path}": {e}')
-        return False
+        return 1
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
@@ -448,6 +490,7 @@ class EventHandler(FileSystemEventHandler):
         if not event.is_directory:
             try:
                 logging.info(f'modified "{event.src_path}"')
+                self.delete_meili(event.src_path)
                 self.create_or_update_meili(event.src_path)
             except Exception as e:
                 logging.exception(f'failed to handle modified event for "{event.src_path}": {e}')
@@ -472,7 +515,7 @@ class EventHandler(FileSystemEventHandler):
 
     def create_or_update_meili(self, file_path):
         try:
-            _, document = create_meili_doc_from_file_path(file_path)
+            fp, document, status = create_meili_doc_from_file_path(file_path)
             self.index.add_documents([document])
             logging.info(f'Added/Updated "{file_path}" in index')
         except Exception as e:
@@ -511,7 +554,8 @@ async def update_meili_docs():
     while True:
         for module in modules:
             await augment_meili_docs(module)
-        asyncio.sleep(300)
+        logging.info(f'waiting for next module cycle')
+        await asyncio.sleep(SLEEP_BETWEEN_MODULE_RUNS)
            
 async def main():
     await init_meili()

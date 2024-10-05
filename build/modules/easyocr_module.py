@@ -9,6 +9,7 @@ import os
 
 NAME = "easyocr"
 FIELD_NAME = "easyocrVersion"
+DATA_FIELD_NAMES = ["ocr"]
 MAX_WORKERS = 1
 VERSION = 1
 
@@ -82,11 +83,12 @@ async def init():
 async def cleanup():
     return
 
-async def get_fields(file_path, mime):
+async def get_fields(file_path, doc):
+    type = doc["type"]
     text = ""
     
     with reader_lock:
-        if mime in PDF_MIME_TYPES:
+        if type in PDF_MIME_TYPES:
             # Convert PDF to images
             from pdf2image import convert_from_path
             images = convert_from_path(file_path)
@@ -95,7 +97,7 @@ async def get_fields(file_path, mime):
                 results = reader.readtext(image_np, detail=0)
                 text += ' '.join(results) + ' '
             text = text.strip()
-        elif mime in RAW_MIME_TYPES:
+        elif type in RAW_MIME_TYPES:
             # Process RAW image
             with rawpy.imread(file_path) as raw:
                 rgb_image = raw.postprocess()
@@ -104,7 +106,7 @@ async def get_fields(file_path, mime):
             # Perform OCR
             results = reader.readtext(image_np, detail=0)
             text = ' '.join(results)
-        elif mime in VECTOR_MIME_TYPES:
+        elif type in VECTOR_MIME_TYPES:
             # Use wand to convert vector images and Adobe formats to raster images
             with WandImage(filename=file_path, resolution=300) as img:
                 img.format = 'png'
@@ -114,7 +116,7 @@ async def get_fields(file_path, mime):
             # Perform OCR
             results = reader.readtext(image_np, detail=0)
             text = ' '.join(results)
-        elif mime in STANDARD_IMAGE_MIME_TYPES:
+        elif type in STANDARD_IMAGE_MIME_TYPES:
             # Process standard image formats
             image_pil = Image.open(file_path)
             image_np = np.array(image_pil)
@@ -123,6 +125,6 @@ async def get_fields(file_path, mime):
             text = ' '.join(results)
         else:
             # Unsupported MIME type
-            print(f"Unsupported MIME type: {mime}")
+            print(f"Unsupported MIME type: {type}")
             
-    return {"ocr": text}
+    yield {"ocr": text}

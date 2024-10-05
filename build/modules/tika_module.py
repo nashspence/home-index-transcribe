@@ -6,7 +6,8 @@ tika_mimes = json.loads(config.getMimeTypes())
 
 NAME = "tika"
 FIELD_NAME = "tikaVersion"
-MAX_WORKERS = 24
+DATA_FIELD_NAMES = ["text"]
+MAX_WORKERS = 32
 VERSION = 1
 
 def does_support_mime(mime):
@@ -26,6 +27,6 @@ async def init():
 async def cleanup():
     return
     
-async def get_fields(file_path, mime):
+async def get_fields(file_path, doc):
     parsed = await asyncio.to_thread(parser.from_file, file_path)
-    return { "text": parsed.get("content", "") }
+    yield { "text": parsed.get("content", "") }
