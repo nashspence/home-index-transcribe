@@ -36,3 +36,4 @@ services:
     volumes:
       - /home/ns/services/meilisearch/volumes/indexer:/app/data
       - /home/ns/shared:/data:ro
+      - /home/ns/services/meilisearch/volumes/indexer/pytorch:/root/.cache/torch/

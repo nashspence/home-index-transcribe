@@ -38,7 +38,7 @@ logging.basicConfig(
     ],
 )
 
-other_loggers = ['httpx', 'tika.tika', 'faster_whisper'] 
+other_loggers = ['httpx'] 
 for logger_name in other_loggers:
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.WARNING)
@@ -54,7 +54,7 @@ file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(messa
 logger.addHandler(file_handler)
 logger.propagate = False
 
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "604800"))
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
 MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
