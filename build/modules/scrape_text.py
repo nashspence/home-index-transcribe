@@ -4,9 +4,9 @@ import asyncio
 
 tika_mimes = json.loads(config.getMimeTypes())
 
-NAME = "tika"
-FIELD_NAME = "tikaVersion"
-DATA_FIELD_NAMES = ["text"]
+NAME = "scrape text"
+FIELD_NAME = "scraped_text_version"
+DATA_FIELD_NAMES = ["scraped_text"]
 MAX_WORKERS = 32
 VERSION = 1
 
@@ -29,4 +29,4 @@ async def cleanup():
     
 async def get_fields(file_path, doc):
     parsed = await asyncio.to_thread(parser.from_file, file_path)
-    yield { "text": parsed.get("content", "") }
+    yield { "scraped_text": parsed.get("content", "") }

@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     imagemagick \
     poppler-utils \
     libgomp1 \
+    tesseract-ocr \
     && apt-get clean
 
 ENV JAVA_HOME /usr/lib/jvm/java-17-openjdk-amd64
@@ -25,11 +26,11 @@ RUN pip install meilisearch_python_sdk \
     ffmpeg-python \
     watchdog \
     pdf2image \
-    easyocr \
     numpy \
     rawpy \
     Pillow \
-    wand
+    wand \
+    pytesseract
 
 COPY index.py .
 COPY modules .

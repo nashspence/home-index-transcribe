@@ -7,6 +7,13 @@ functions, and documentation required to integrate seamlessly with the app.
 
 """
 
+# Module Metadata Constants
+NAME = "example"                           # REQUIRED: Unique name of the module
+FIELD_NAME = "example_version"              # REQUIRED: Field name for versioning
+DATA_FIELD_NAMES = []                      # REQUIRED: Data fields to fetch for continue incrementally
+MAX_WORKERS = 8                            # REQUIRED: Maximum concurrent workers
+VERSION = 1                                # REQUIRED: Module version, will cause all match files to process again if incremented
+
 # Define supported image MIME types
 SUPPORTED_MIMES = {
     'image/jpeg',
@@ -17,12 +24,19 @@ SUPPORTED_MIMES = {
     'image/webp'
 }
 
-# Module Metadata Constants
-NAME = "image_metadata"                    # REQUIRED: Unique name of the module
-FIELD_NAME = "imageMetadataVersion"        # REQUIRED: Field name for versioning
-DATA_FIELD_NAMES = []                      # REQUIRED: Data fields to fetch for continue incrementally
-MAX_WORKERS = 8                            # REQUIRED: Maximum concurrent workers
-VERSION = 1                                # REQUIRED: Module version, will cause all match files to process again if incremented
+def does_support_mime(mime):
+    """
+    REQUIRED
+    
+    Determine if the module supports a given MIME type.
+
+    Args:
+        mime (str): The MIME type of the file to check.
+
+    Returns:
+        bool: True if the MIME type is supported, False otherwise.
+    """
+    return mime in SUPPORTED_MIMES
 
 async def init():
     """
@@ -55,20 +69,6 @@ async def cleanup():
     """
     return
 
-def does_support_mime(mime):
-    """
-    REQUIRED
-    
-    Determine if the module supports a given MIME type.
-
-    Args:
-        mime (str): The MIME type of the file to check.
-
-    Returns:
-        bool: True if the MIME type is supported, False otherwise.
-    """
-    return mime in SUPPORTED_MIMES
-
 async def get_fields(file_path, doc):
     """
     REQUIRED
@@ -82,8 +82,9 @@ async def get_fields(file_path, doc):
 
     Args:
         file_path (str): The full path to the file.
-        doc (dict): The existing document dictionary that may contain pre-existing data to continue a previous run.
+        doc (dict): Document dictionary that will contain DATA_FIELD_NAMES from previous run if previously yielded. 
+                    Also, has doc["type"] which is the mime type for the current file
 
     Yields:
-        dict: A dictionary with extracted metadata fields.
+        dict: A dictionary with extracted metadata fields. Can be incomplete and continued later using doc arg.
     """

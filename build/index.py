@@ -4,8 +4,10 @@ import asyncio
 import hashlib
 import magic
 import mimetypes
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import time
+import datetime
+import time
+import math
+from itertools import chain
 from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process
@@ -13,10 +15,10 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-import tika_module
-import whisper_module
+import scrape_text
+import transcribe_audio
 
-modules = [tika_module, whisper_module]
+modules = [scrape_text, transcribe_audio]
 
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
@@ -30,7 +32,7 @@ logging.basicConfig(
             when="midnight",
             interval=1,
             backupCount=7,
-            atTime=time(2, 30)
+            atTime=datetime.time(2, 30)
         ),
         logging.StreamHandler(),
     ],
@@ -52,13 +54,13 @@ file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(messa
 logger.addHandler(file_handler)
 logger.propagate = False
 
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "900"))
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
 MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
 MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
 OS_DIRECTORY_TO_INDEX = os.environ.get("OS_DIRECTORY_TO_INDEX", "/data")
-SLEEP_BETWEEN_MODULE_RUNS = int(os.environ.get("SLEEP_BETWEEN_MODULE_RUNS", "300"))
+RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "3600"))
 
 client = None
 index = None
@@ -81,12 +83,20 @@ async def init_meili():
             logging.exception(f"meili init failed")
             raise
 
-    filterable_attributes = ["id"] + [module.FIELD_NAME for module in modules]
+    filterable_attributes = [
+        "id", 
+        "mime", 
+        "ctime", 
+        "mtime", 
+        "size"
+        "name"
+        "url"
+    ] + list(chain(*[[module.FIELD_NAME] + module.DATA_FIELD_NAMES for module in modules]))
     
     try:
         logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
-        await index.update_sortable_attributes(["mtime"])
+        await index.update_sortable_attributes(["ctime", "mtime", "size"])
     except Exception:
         logging.exception(f"meili update index attrs failed")
         raise
@@ -177,7 +187,7 @@ async def get_all_pending_jobs(module):
     offset = 0
     limit = MEILISEARCH_BATCH_SIZE
     filter_query = f'{module.FIELD_NAME} < {module.VERSION}'
-    fields = ["url", "mtime", "type"] + module.DATA_FIELD_NAMES
+    fields = ["url", "mtime", "mime"] + module.DATA_FIELD_NAMES
     
     try:
         while True:
@@ -249,8 +259,9 @@ async def sync_meili_docs():
     added_document_ids = set()
     updated_document_ids = set()
     create_document_tasks = []
+    added_or_updated_documents = []
 
-    logging.info(f"meili {len(expected_documents)} indexed")
+    logging.info(f"meili has {len(expected_documents)}")
     
     doc_creation_semaphore = asyncio.Semaphore(32)
     async def async_create_meili_doc_from_file_path(file_path):
@@ -269,19 +280,20 @@ async def sync_meili_docs():
                 elif entry.is_file(follow_symlinks=False):
                     id = get_meili_id_from_file_path(entry.path)
                     path_mtime = Path(entry.path).stat().st_mtime
-                    if id not in expected_documents_by_id or expected_documents_by_id[id]["mtime"] < path_mtime:
+                    if id not in expected_documents_by_id or not math.isclose(expected_documents_by_id[id]["mtime"], path_mtime, abs_tol=1e-7):
                         task = asyncio.create_task(async_create_meili_doc_from_file_path(entry.path))
                         create_document_tasks.append(task)
                         if id not in expected_documents_by_id:
                             added_document_ids.add(id)
-                        elif expected_documents_by_id[id]["mtime"] < path_mtime:
+                        elif not math.isclose(expected_documents_by_id[id]["mtime"], path_mtime, abs_tol=1e-7):
                             updated_document_ids.add(id)
                     current_file_paths.add(entry.path)
         except Exception:
             logging.exception(f'os scan directory failed "{dir_path}"')
 
-    done, _ = await asyncio.wait(create_document_tasks)
-    added_or_updated_documents = [task.result() for task in done if task.result() is not None]
+    if len(create_document_tasks) > 0:
+        done, _ = await asyncio.wait(create_document_tasks)
+        added_or_updated_documents = [task.result() for task in done if task.result() is not None]
 
     deleted_file_paths = previous_file_paths - current_file_paths
     deleted_document_ids = {get_meili_id_from_file_path(fp) for fp in deleted_file_paths}
@@ -295,7 +307,7 @@ async def sync_meili_docs():
     logging.info(f"meili added {len(added_document_ids)}")
     logging.info(f"meili updated {len(updated_document_ids)}")
     logging.info(f"meili deleted {len(deleted_document_ids)}")
-    logging.info(f"meili {total_expected_documents} now indexed")
+    logging.info(f"meili now has {total_expected_documents}")
 
 def create_meili_doc_from_file_path(file_path):
     try:
@@ -312,7 +324,7 @@ def create_meili_doc_from_file_path(file_path):
             "mtime": current_mtime,
             "ctime": stat.st_ctime,
             "url": get_url_from_relative_path(relative_path),
-            "type": mime,
+            "mime": mime,
         }
         for module in modules:
             if module.does_support_mime(mime):
@@ -337,7 +349,7 @@ async def augment_meili_docs(module):
     if not file_paths_with_mime:
         return
 
-    logging.info(f"{module.NAME} start for {len(file_paths_with_mime)} files")
+    logging.info(f"{module.NAME} started for {len(file_paths_with_mime)} files")
 
     try:
         logging.debug(f"init {module.NAME}")
@@ -398,7 +410,7 @@ async def augment_meili_docs(module):
         logging.exception(f'{module.NAME} failed')
 
     try:
-        logging.debug(f"{module.NAME} cleanup")
+        logging.debug(f"{module.NAME} cleaned up")
         await module.cleanup()
     except Exception:
         logging.exception(f"{module.NAME} cleanup failed")
@@ -408,7 +420,7 @@ async def augment_meili_doc_from_file_path(file_path, doc, module):
     path = Path(file_path)
     relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
     
-    logging.debug(f'{module.NAME} start "{relative_path}"')
+    logging.debug(f'{module.NAME} started "{relative_path}"')
     
     id = get_meili_id_from_relative_path(relative_path)
 
@@ -475,8 +487,8 @@ class EventHandler(FileSystemEventHandler):
                 logging.exception(f'move failed "{event.src_path}" -> "{event.dest_path}"')
 
     def create_or_update_meili(self, file_path):
-        fp, document, status = create_meili_doc_from_file_path(file_path)
-        self.index.add_documents([document])
+        document = create_meili_doc_from_file_path(file_path)
+        self.index.update_document(document)
 
     def delete_meili(self, file_path):
         id = get_meili_id_from_file_path(file_path)
@@ -500,16 +512,18 @@ def process_main():
 async def update_meili_docs():
     await sync_meili_docs()
     
-    logging.info(f'start watchdog process')
     process = Process(target=process_main)
     process.start()    
+    logging.info(f'watchdog process started')
     
     while True:
+        start_time = time.time()
         for module in modules:
             await augment_meili_docs(module)
-        logging.info(f'wait for next cycle')
+        elapsed_time = time.time() - start_time
         await wait_for_idle_meili()
-        await asyncio.sleep(SLEEP_BETWEEN_MODULE_RUNS)
+        if elapsed_time < 60:
+            await asyncio.sleep(RECHECK_TIME_AFTER_COMPLETE)
            
 async def main():
     await init_meili()
