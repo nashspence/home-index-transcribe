@@ -837,7 +837,7 @@ def scrape_with_exiftool(file_path):
         with exiftool.ExifToolHelper() as et:
             return et.get_metadata(file_path)[0]
     except Exception:
-        logging.warning(f"scrape file bytes exiftool failed")
+        logging.warning(f'scrape file bytes exiftool failed "{file_path}"')
         return None
 
 def scrape_with_ffprobe(file_path):
@@ -852,7 +852,7 @@ def scrape_with_ffprobe(file_path):
         metadata['streams'] = streams_by_type
         return metadata
     except Exception:
-        logging.warning(f"scrape file bytes ffprobe failed")
+        logging.warning(f'scrape file bytes ffprobe failed "{file_path}"')
         return None
     
 def scrape_with_libmediainfo(file_path):
@@ -867,7 +867,7 @@ def scrape_with_libmediainfo(file_path):
             'Menu': [track.to_data() for track in media_info.menu_tracks]
         }}
     except Exception:
-        logging.warning(f"scrape file bytes libmediainfo failed")
+        logging.warning(f'scrape file bytes libmediainfo failed "{file_path}"')
         return None
     
 def scrape_with_os(file_path):
@@ -887,7 +887,7 @@ def scrape_with_os(file_path):
             'uid': stat_info.st_uid,
         }
     except Exception:
-        logging.warning(f"scrape file bytes os stat failed")
+        logging.warning(f'scrape file bytes os stat failed "{file_path}"')
         return None
                   
 tika_server_process = None
@@ -901,7 +901,7 @@ def scrape_with_tika(file_path):
             wait_for_tika_server()
             return tika_parser.from_file(file_path)
         except:
-            logging.warning(f"scrape file bytes tika failed")
+            logging.warning(f'scrape file bytes tika failed "{file_path}"')
             return None
 
 async def wait_for_tika_server(port, timeout=30):
