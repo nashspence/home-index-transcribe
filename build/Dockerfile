@@ -3,17 +3,17 @@
 FROM intel/intel-optimized-pytorch:2.4.0-idp-base
 
 RUN apt-get update && apt-get install -y \
-    openjdk-17-jre-headless \
-    shared-mime-info \
-    libmagic1 \
-    file \
+    exiftool \
     ffmpeg \
-    imagemagick \
-    poppler-utils \
-    libgomp1 \
-    tesseract-ocr \
+    file \
     git \
-    dcraw \
+    imagemagick \
+    libgomp1 \
+    libmagic1 \
+    libmediainfo0v5 \
+    openjdk-17-jre-headless \
+    poppler-utils \
+    shared-mime-info \
     && apt-get clean
 
 ENV JAVA_HOME /usr/lib/jvm/java-17-openjdk-amd64
@@ -21,19 +21,22 @@ ENV PATH $JAVA_HOME/bin:$PATH
 
 WORKDIR /app
 
-RUN pip install meilisearch_python_sdk \
+RUN pip install \
+    Pillow \
+    aiohttp \
+    ffmpeg-python \
+    flatdict \
+    git+https://github.com/m-bain/whisperx.git \
+    jmespath \
+    meilisearch_python_sdk \
+    numpy \
+    pdf2image \
+    pyexiftool \
+    pymediainfo \
     python-magic \
     tika \
-    git+https://github.com/m-bain/whisperx.git \
-    ffmpeg-python \
-    watchdog \
-    pdf2image \
-    numpy \
-    scikit-image \
-    rawpy \
-    Pillow \
     wand \
-    pytesseract
+    watchdog
 
 COPY index.py .
 COPY modules .

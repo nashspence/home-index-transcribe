@@ -57,7 +57,7 @@ STANDARD_IMAGE_MIME_TYPES = {
     'image/webp'
 }
 
-SUPPORTED_MIMES = (
+SUPPORTED_MIME_TYPES = (
     PDF_MIME_TYPES |
     RAW_MIME_TYPES |
     VECTOR_MIME_TYPES |
@@ -67,7 +67,7 @@ SUPPORTED_MIMES = (
 model = None
 
 def does_support_mime(mime):
-    return mime in SUPPORTED_MIMES
+    return mime in SUPPORTED_MIME_TYPES
 
 async def init():
     global model
@@ -113,7 +113,7 @@ def extract_text_from_image(image):
         print(f"Failed to extract text from image: {e}")
         return ""
 
-async def get_fields(file_path, doc):
+async def get_fields(file_path, mime, info, doc):
     mime_type = doc.get("mime", "")
     detected_objects = []
     extracted_text = ""

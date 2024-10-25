@@ -7,6 +7,7 @@ import mimetypes
 import datetime
 import time
 import math
+
 from itertools import chain
 from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
@@ -15,13 +16,13 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-import scrape_text
-import transcribe_audio
-
-modules = [scrape_text, transcribe_audio]
-
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
+
+import scrape_file_bytes
+import transcribe_audio
+
+modules = [scrape_file_bytes, transcribe_audio]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,23 +39,22 @@ logging.basicConfig(
     ],
 )
 
-other_loggers = ['httpx'] 
-for logger_name in other_loggers:
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.WARNING)
-    file_handler = logging.FileHandler(f"./data/logs/{logger_name}.log")
-    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(file_handler)
-    logger.propagate = False
+logger = logging.getLogger('httpx')
+logger.setLevel(logging.WARNING)
+file_handler = logging.FileHandler(f"./data/logs/httpx.log")
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(file_handler)
+logger.propagate = False
     
 logger = logging.getLogger('watchdog')
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 file_handler = logging.FileHandler(f"./data/logs/watchdog.log")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(file_handler)
 logger.propagate = False
 
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "604800"))
+VERSION = 1
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "86400"))
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
 MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
@@ -88,15 +88,15 @@ async def init_meili():
         "mime", 
         "ctime", 
         "mtime", 
-        "size"
-        "name"
-        "url"
-    ] + list(chain(*[[module.FIELD_NAME] + module.DATA_FIELD_NAMES for module in modules]))
+        "size",
+        "name",
+        "url",
+    ] + list(chain(*[module.FILTERABLE_FIELD_NAMES for module in modules]))
     
     try:
         logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
-        await index.update_sortable_attributes(["ctime", "mtime", "size"])
+        await index.update_sortable_attributes(["ctime", "mtime", "size"] + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules])))
     except Exception:
         logging.exception(f"meili update index attrs failed")
         raise
@@ -186,13 +186,13 @@ async def get_all_pending_jobs(module):
     docs = []
     offset = 0
     limit = MEILISEARCH_BATCH_SIZE
-    filter_query = f'{module.FIELD_NAME} < {module.VERSION}'
-    fields = ["url", "mtime", "mime"] + module.DATA_FIELD_NAMES
+    mime_filter = " OR ".join([f"mime = '{mime}'" for mime in await module.get_supported_mime_types()])
+    fields = ["url", "mtime", "mime", "index_info"] + module.DATA_FIELD_NAMES
     
     try:
         while True:
             response = await index.get_documents(
-                filter=filter_query,
+                filter=mime_filter,
                 limit=limit,
                 offset=offset,
                 fields=fields
@@ -280,7 +280,7 @@ async def sync_meili_docs():
                 elif entry.is_file(follow_symlinks=False):
                     id = get_meili_id_from_file_path(entry.path)
                     path_mtime = Path(entry.path).stat().st_mtime
-                    if id not in expected_documents_by_id or not math.isclose(expected_documents_by_id[id]["mtime"], path_mtime, abs_tol=1e-7):
+                    if id not in expected_documents_by_id or not math.isclose(expected_documents_by_id[id]["mtime"], path_mtime, abs_tol=1e-7 or expected_documents_by_id[id]["index_info"]["version"] != VERSION):
                         task = asyncio.create_task(async_create_meili_doc_from_file_path(entry.path))
                         create_document_tasks.append(task)
                         if id not in expected_documents_by_id:
@@ -317,6 +317,7 @@ def create_meili_doc_from_file_path(file_path):
         current_mtime = stat.st_mtime
         mime = get_mime_magic(path)
         doc_id = get_meili_id_from_relative_path(relative_path)
+        
         document = {
             "id": doc_id,
             "name": path.name,
@@ -325,16 +326,21 @@ def create_meili_doc_from_file_path(file_path):
             "ctime": stat.st_ctime,
             "url": get_url_from_relative_path(relative_path),
             "mime": mime,
+            "index_info": { "version": VERSION }
         }
-        for module in modules:
-            if module.does_support_mime(mime):
-                document[module.FIELD_NAME] = 0
         return document
     except Exception:
         logging.exception(f'os create doc failed "{file_path}"')
         return None
 
 async def augment_meili_docs(module):
+    try:
+        logging.debug(f"init {module.NAME}")
+        await module.init()
+    except Exception:
+        logging.exception(f"{module.NAME} init failed")
+        return
+    
     try:
         logging.debug(f"{module.NAME} get pending files")
         pending_jobs = await get_all_pending_jobs(module)
@@ -352,14 +358,7 @@ async def augment_meili_docs(module):
     logging.info(f"{module.NAME} started for {len(file_paths_with_mime)} files")
 
     try:
-        logging.debug(f"init {module.NAME}")
-        await module.init()
-    except Exception:
-        logging.exception(f"{module.NAME} init failed")
-        return
-
-    try:
-        semaphore = asyncio.Semaphore(module.MAX_WORKERS)
+        semaphore = asyncio.Semaphore(32)
 
         async def sem_task(fp):
             async with semaphore:
@@ -426,24 +425,25 @@ async def augment_meili_doc_from_file_path(file_path, doc, module):
 
     if not path.exists():
         return "not found"
+    
+    mime = doc['mime']
+    info = doc['index_info'][module.NAME] if module.NAME in doc['index_info'] else None
 
-    async for fields in module.get_fields(file_path, doc):
+    async for fields, info in module.get_fields(file_path, mime, info, doc):
         if not path.exists():
             return "not found"
         
+        index_info = doc['index_info']
+        index_info[module.NAME] = info
+        
         updated_doc = {
             "id": id,
-            **fields,
+            "index_info": index_info,
+            **(fields if not fields is None else {}),
         }
         
         await add_or_update_doc_meili(updated_doc)
         
-    updated_doc = {
-        "id": id,
-        f'{module.FIELD_NAME}': module.VERSION,
-    }
-    
-    await add_or_update_doc_meili(updated_doc)
     return "success"
      
 class EventHandler(FileSystemEventHandler):

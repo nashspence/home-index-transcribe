@@ -69,7 +69,7 @@ async def cleanup():
     """
     return
 
-async def get_fields(file_path, doc):
+async def get_fields(file_path, mime, info, doc):
     """
     REQUIRED
     
