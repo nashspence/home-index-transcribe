@@ -269,25 +269,25 @@ LOCATION = ({
 
 DATE_REGEX_PATTERN = r'''(?x)
     ^
-    (?P<year>\d{4})
+    (?P<year>(?!0000)\d{4})
     (?:
         (?P<date_sep>[-:]?)
-        (?P<month>\d{2})
+        (?P<month>0[1-9]|1[0-2])
         (?:
             (?P=date_sep)
-            (?P<day>\d{2})
+            (?P<day>0[1-9]|[12][0-9]|3[01])
         )?
     )?
     (?:
         (?P<datetime_sep>[T\s]?)
-        (?P<hour>\d{2})
+        (?P<hour>[01][0-9]|2[0-3])
         (?:
             (?:
                 (?P<time_sep>[:]?)
-                (?P<minute>\d{2})
+                (?P<minute>[0-5][0-9])
                 (?:
                     (?P=time_sep)
-                    (?P<second>\d{2})
+                    (?P<second>[0-5][0-9])
                     (?:
                         \.(?P<microsecond>\d{1,6})
                     )?
@@ -297,9 +297,10 @@ DATE_REGEX_PATTERN = r'''(?x)
     )?
     (?P<tzinfo>
         Z|
-        [+-]\d{2}:?\d{2}
+        [+-](0[0-9]|1[0-4]):?[0-5][0-9]
     )?
-    $'''
+    $
+'''
 
 date_regex = re.compile(DATE_REGEX_PATTERN, re.VERBOSE)
 
@@ -363,7 +364,7 @@ def extract_timestamp(data):
                     components = set(k for k, v in parsed_components.items() if v and k in datetime_components)
                     parsed_datetimes.append((dt, components))
             except Exception as e:
-                logging.exception(e)
+                logging.exception(f'{key} {value} {parsed_components} {dt_kwargs} : {e}')
                 pass
                 
     ctime_list = data.get('fs.ctime', [])
@@ -836,8 +837,8 @@ def scrape_with_exiftool(file_path):
     try:
         with exiftool.ExifToolHelper() as et:
             return et.get_metadata(file_path)[0]
-    except Exception:
-        logging.warning(f'scrape file bytes exiftool failed "{file_path}"')
+    except Exception as e:
+        logging.warning(f'scrape file bytes exiftool failed "{file_path}" {e}')
         return None
 
 def scrape_with_ffprobe(file_path):
@@ -851,8 +852,8 @@ def scrape_with_ffprobe(file_path):
             streams_by_type[stream_type].append(stream)
         metadata['streams'] = streams_by_type
         return metadata
-    except Exception:
-        logging.warning(f'scrape file bytes ffprobe failed "{file_path}"')
+    except Exception as e:
+        logging.warning(f'scrape file bytes ffprobe failed "{file_path}" {e}')
         return None
     
 def scrape_with_libmediainfo(file_path):
@@ -866,8 +867,8 @@ def scrape_with_libmediainfo(file_path):
             'Text': [track.to_data() for track in media_info.text_tracks],
             'Menu': [track.to_data() for track in media_info.menu_tracks]
         }}
-    except Exception:
-        logging.warning(f'scrape file bytes libmediainfo failed "{file_path}"')
+    except Exception as e:
+        logging.warning(f'scrape file bytes libmediainfo failed "{file_path}": {e}')
         return None
     
 def scrape_with_os(file_path):
@@ -886,8 +887,8 @@ def scrape_with_os(file_path):
             'size': stat_info.st_size,
             'uid': stat_info.st_uid,
         }
-    except Exception:
-        logging.warning(f'scrape file bytes os stat failed "{file_path}"')
+    except Exception as e:
+        logging.warning(f'scrape file bytes os stat failed "{file_path}": {e}')
         return None
                   
 tika_server_process = None
@@ -900,8 +901,8 @@ def scrape_with_tika(file_path):
         try:
             wait_for_tika_server()
             return tika_parser.from_file(file_path)
-        except:
-            logging.warning(f'scrape file bytes tika failed "{file_path}"')
+        except Exception as e:
+            logging.warning(f'scrape file bytes tika failed "{file_path}": {e}')
             return None
 
 async def wait_for_tika_server(port, timeout=30):
