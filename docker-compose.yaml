@@ -35,5 +35,5 @@ services:
     restart: unless-stopped
     volumes:
       - /home/ns/services/meilisearch/volumes/indexer:/app/data
-      - /home/ns/shared:/data:ro
+      - /home/ns/shared:/data
       - /home/ns/services/meilisearch/volumes/indexer/pytorch:/root/.cache/torch/

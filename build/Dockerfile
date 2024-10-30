@@ -3,6 +3,7 @@
 FROM intel/intel-optimized-pytorch:2.4.0-idp-base
 
 RUN apt-get update && apt-get install -y \
+    attr \
     exiftool \
     ffmpeg \
     file \
@@ -34,7 +35,6 @@ RUN pip install \
     pyexiftool \
     pymediainfo \
     python-magic \
-    tika \
     wand \
     watchdog
 

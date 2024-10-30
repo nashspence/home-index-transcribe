@@ -7,12 +7,13 @@ import flatdict
 import jmespath
 import json
 import logging
+import os
 import pymediainfo
 import re
 import subprocess
+import tempfile
 
 from pathlib import Path
-from tika import parser as tika_parser, config as tika_config
 
 NAME = "scrape file bytes"
 DATA_FIELD_NAMES = [
@@ -24,16 +25,9 @@ DATA_FIELD_NAMES = [
     'audio_sample_rate',
     'camera_lens_make',
     'camera_lens_model',
-    'creation_day',
-    'creation_hour',
-    'creation_microsecond',
-    'creation_minute',
-    'creation_month',
-    'creation_second',
-    'creation_timestamp',
-    'creation_timezone_name',
-    'creation_timezone_offset_minutes',
-    'creation_year',
+    'creation_date',
+    'creation_date_format'
+    'creation_date_timezone_name',
     'device_make',
     'device_model',
     'duration',
@@ -44,6 +38,7 @@ DATA_FIELD_NAMES = [
     'image_byte_ranges',
     'latitude',
     'longitude',
+    'metadata_dump',
     'video_bit_rate',
     'video_codec',
     'video_frame_rate',
@@ -58,16 +53,9 @@ FILTERABLE_FIELD_NAMES = [
     'audio_sample_rate',
     'camera_lens_make',
     'camera_lens_model',
-    'creation_day',
-    'creation_hour',
-    'creation_microsecond',
-    'creation_minute',
-    'creation_month',
-    'creation_second',
-    'creation_timestamp',
-    'creation_timezone_name',
-    'creation_timezone_offset_minutes',
-    'creation_year',
+    'creation_date',
+    'creation_date_format'
+    'creation_date_timezone_name',
     'device_make',
     'device_model',
     'duration',
@@ -81,9 +69,9 @@ FILTERABLE_FIELD_NAMES = [
 ]
 SORTABLE_FIELD_NAMES = [
     'duration',
-    'creation_timestamp'
+    'creation_date'
 ]
-VERSION = 1
+VERSION = 3
 
 AUDIO_MIME_TYPES = {
     "audio/aac", "audio/flac", "audio/mpeg", "audio/mp4", "audio/ogg", 
@@ -124,6 +112,23 @@ ARCHIVE_MIME_TYPES = {
     'application/vnd.rar', 'application/x-ace-compressed', 'application/x-apple-diskimage',
     'application/x-xz', 'application/x-lzip', 'application/x-lzma'
 }
+
+XATTR_SUPPORTED = None
+
+def check_xattr_supported():
+    global XATTR_SUPPORTED
+    if XATTR_SUPPORTED is None:
+        try:
+            with tempfile.NamedTemporaryFile() as temp_file:
+                test_attr_name = "user.test"
+                os.setxattr(temp_file.name, test_attr_name, b"test")
+                os.removexattr(temp_file.name, test_attr_name)
+            XATTR_SUPPORTED = True
+        except (AttributeError, OSError):
+            XATTR_SUPPORTED = False
+            logging.warning("xattr operations are not supported on this system.")
+
+check_xattr_supported()
 
 def extract_location_data(data):
     def from_iso6709():
@@ -188,7 +193,7 @@ def extract_location_data(data):
         latitude_list = data.get('latitude', [])
         longitude_list = data.get('longitude', [])
         
-        if not latitude_list or not longitude_list:
+        if not latitude_list or not longitude_list or latitude_list[0] == '' or longitude_list[0] == '':
             return None
         
         try:
@@ -218,7 +223,6 @@ def extract_location_data(data):
         except Exception as e:
             logging.exception("Failed to parse latitude or longitude values.")
             return None
-
 
     for extractor in [from_iso6709, from_gps_coordinates, from_gps_position, from_lat_long]:
         result = extractor()
@@ -400,26 +404,39 @@ def extract_timestamp(data):
                     tzinfo = getattr(best_dt, 'tzinfo')
                     if tzinfo:
                         ctime_dt = ctime_dt.astimezone(tzinfo)
+                        components = {'year', 'month', 'day', 'hour', 'minute', 'second', 'microsecond'}
                     best_dt = ctime_dt
             except Exception as e:
                 logging.exception(e)
                 pass
-        timestamp_data = {
-            f"creation_{comp}": getattr(best_dt, comp)
-            for comp in components if comp != 'tzinfo'
+        
+        component_to_format = {
+            "year": "%Y",
+            "month": "%m",
+            "day": "%d",
+            "hour": "%H",
+            "minute": "%M",
+            "second": "%S",
+            "microsecond": "%f",
+            "tzinfo": "%z"
         }
+
+        date_format = "-".join(component_to_format[comp] for comp in ["year", "month", "day"] if comp in components)
+        time_format = ":".join(component_to_format[comp] for comp in ["hour", "minute", "second"] if comp in components)
+        microsecond_format = component_to_format["microsecond"] if "microsecond" in components else ""
+        tz_format = component_to_format["tzinfo"] if "creation_tzinfo" in timestamp_data else ""
+        time_format = f"{time_format}.{microsecond_format}" if time_format and microsecond_format else time_format
+        timestamp_data['creation_date_format'] = f"{date_format} {time_format} {tz_format}".strip()
+        
         if 'tzinfo' in components:
-            if best_dt.utcoffset() is not None:
-                timestamp_data['creation_timezone_offset_minutes'] = int(best_dt.utcoffset().total_seconds() / 60)
-            else:
-                timestamp_data['creation_timezone_offset_minutes'] = None
-            timestamp_data['creation_timezone_name'] = best_dt.tzname()
-        timestamp_data['creation_timestamp'] = best_dt.timestamp()
+            timestamp_data['creation_date_timezone_name'] = best_dt.tzname()
+            
+        timestamp_data['creation_date'] = best_dt.timestamp()
     else:
         if ctime:
             try:
                 timestamp = float(ctime)
-                timestamp_data['creation_timestamp'] = timestamp
+                timestamp_data['creation_date'] = timestamp
             except Exception as e:
                 logging.exception(e)
                 pass
@@ -673,7 +690,7 @@ VIDEO_FRAME_RATE = ({
 
 TEXT = ({
     'text': [
-        'tika.content',
+        'tika."X-TIKA:content"',
     ]
 }, lambda d: {'text': re.sub(r'\n\s*\n+', '\n\n', str(d['text'][0]).strip())} if d['text'] else None)
 
@@ -799,8 +816,17 @@ def scrape_file_path(filepath):
             )?
         )?
     '''
-    match = re.search(pattern, filepath)
-    if match:
+    matches = re.finditer(pattern, filepath)
+    best_match = None
+    max_components = -1
+    for match in matches:
+        components = ['year', 'month', 'day', 'hour', 'minute', 'second', 'fraction', 'offset']
+        num_components = sum(1 for comp in components if match.group(comp) is not None)
+        if num_components > max_components:
+            max_components = num_components
+            best_match = match
+    if best_match:
+        match = best_match
         result = match.group('year')
         if match.group('month'):
             result += f"-{match.group('month')}"
@@ -853,7 +879,7 @@ def scrape_with_ffprobe(file_path):
         metadata['streams'] = streams_by_type
         return metadata
     except Exception as e:
-        logging.warning(f'scrape file bytes ffprobe failed "{file_path}" {e}')
+        logging.warning(f'scrape file bytes ffprobe failed "{file_path}" {e} stderr_output="{e.stderr}"')
         return None
     
 def scrape_with_libmediainfo(file_path):
@@ -875,7 +901,8 @@ def scrape_with_os(file_path):
     try:
         path = Path(file_path)
         stat_info = path.stat()
-        return {
+        
+        scrape = {
             'atime': stat_info.st_atime,
             'ctime': stat_info.st_ctime,
             'dev': stat_info.st_dev,
@@ -887,6 +914,19 @@ def scrape_with_os(file_path):
             'size': stat_info.st_size,
             'uid': stat_info.st_uid,
         }
+        
+        try:
+            if XATTR_SUPPORTED:
+                for attr_name in os.listxattr(file_path):
+                    try:
+                        data = os.getxattr(file_path, attr_name)
+                        scrape[f'xattr.{attr_name}'] = data.decode('utf-8', errors='ignore')
+                    except Exception as e:
+                        logging.exception(f"Failed to read xattr {attr_name} from {file_path}: {e}")
+        except Exception as e:
+            logging.exception(f"Failed to read xattrs from {file_path}: {e}")
+                    
+        return scrape
     except Exception as e:
         logging.warning(f'scrape file bytes os stat failed "{file_path}": {e}')
         return None
@@ -894,18 +934,7 @@ def scrape_with_os(file_path):
 tika_server_process = None
 log_file = None
 
-def scrape_with_tika(file_path):
-    try:
-        return tika_parser.from_file(file_path)
-    except Exception:
-        try:
-            wait_for_tika_server()
-            return tika_parser.from_file(file_path)
-        except Exception as e:
-            logging.warning(f'scrape file bytes tika failed "{file_path}": {e}')
-            return None
-
-async def wait_for_tika_server(port, timeout=30):
+async def wait_for_tika_server(port=9998, timeout=30):
     start_time = datetime.datetime.now()
     while (datetime.datetime.now() - start_time).total_seconds() < timeout:
         try:
@@ -917,6 +946,27 @@ async def wait_for_tika_server(port, timeout=30):
             pass
         await asyncio.sleep(1)
     raise RuntimeError("Tika server did not start in time")
+
+async def scrape_with_tika(file_path, port=9998):
+    try:
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as file:
+                async with session.put(f'http://localhost:{port}/rmeta/text', data=file) as response:
+                    if response.status == 200:
+                        json = await response.json()
+                        if len(json) > 0:
+                            data = json[0]
+                            keys_to_remove = [key for key in data if key.startswith("X-TIKA:EXCEPTION")]
+                            for key in keys_to_remove:
+                                logging.warning(f"Problem scraping file bytes via Tika for '{file_path}': {key}: {data[key]}")
+                                del data[key]
+                            return data
+                    else:
+                        logging.warning(f"Failed to scrape file '{file_path}': {response.status}")
+                        return None
+    except Exception as e:
+        logging.warning(f"Failed to scrape file bytes via Tika for '{file_path}': {e}")
+        return None
 
 default_key_regex = r"(?i)(offset|start|length|title|author|desc|bit|depth|rate|channels|codec|sample|frame|height|width|dimension|device|make(?!r)|model|manufactur|camera|lens|altitude|orient|rotat|gps|coordinates|latitude|longitude|location|date|(?<!quick)time|zone|offset|iso8601|iso6709|duration)"
 def debug(metadata, file_path, result, key_regex=default_key_regex, file_path_regex=None):
@@ -935,7 +985,6 @@ def debug(metadata, file_path, result, key_regex=default_key_regex, file_path_re
             logging.info(f'"{k}" : "{v}"')
         logging.info(f'scrape file bytes DEBUG end ------------------------')
 
-
 async def init():
     global tika_server_process, log_file
     log_file = open('./data/logs/tika_server.log', 'w')
@@ -946,7 +995,7 @@ async def init():
         stderr=log_file
     )
     
-    await wait_for_tika_server(9998)
+    await wait_for_tika_server()
 
 async def cleanup():
     global tika_server_process, log_file
@@ -956,11 +1005,16 @@ async def cleanup():
     if log_file:
         log_file.close()
         
-async def get_supported_mime_types():
+async def get_supported_mime_types(port=9998):
     global TIKA_SUPPORTED_MIME_TYPES
-    tika_mimes = await asyncio.to_thread(tika_config.getMimeTypes)
-    TIKA_SUPPORTED_MIME_TYPES = set(json.loads(tika_mimes))
-    return list((TIKA_SUPPORTED_MIME_TYPES | VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES) - ARCHIVE_MIME_TYPES)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'http://localhost:{port}/mime-types', headers={"Accept": "application/json"}) as response:
+            if response.status == 200:
+                tika_mimes = await response.json()
+                TIKA_SUPPORTED_MIME_TYPES = set(tika_mimes.keys())
+                return list((TIKA_SUPPORTED_MIME_TYPES | VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES) - ARCHIVE_MIME_TYPES)
+            else:
+                raise RuntimeError(f"Failed to retrieve MIME types: {response.status}")
 
 async def get_fields(file_path, mime, info, doc):
     if info and info.get("file_path") == file_path and info.get("version") == VERSION:
@@ -976,7 +1030,7 @@ async def get_fields(file_path, mime, info, doc):
             futures["ffprobe"] = asyncio.to_thread(scrape_with_ffprobe, file_path)
             futures["libmediainfo"] = asyncio.to_thread(scrape_with_libmediainfo, file_path)
         if mime in TIKA_SUPPORTED_MIME_TYPES:
-            futures["tika"] = asyncio.to_thread(scrape_with_tika, file_path)
+            futures["tika"] = scrape_with_tika(file_path)
 
         results = await asyncio.gather(*futures.values())
         metadata = {key: result for key, result in zip(futures.keys(), results)}
@@ -991,6 +1045,8 @@ async def get_fields(file_path, mime, info, doc):
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
          
         #debug(metadata, file_path, desired_fields, key_regex=None)
+        
+        desired_fields['metadata_dump'] = json.dumps(metadata, separators=(',', ':'))
         yield desired_fields, {"version": VERSION, "file_path": file_path}
     except Exception:
         logging.exception(f'Failed to scrape file bytes {file_path}')

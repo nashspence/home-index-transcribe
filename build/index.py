@@ -1,20 +1,22 @@
-import os
-import logging
 import asyncio
-import hashlib
-import magic
-import mimetypes
 import datetime
-import time
+import json
+import logging
+import magic
 import math
+import mimetypes
+import os
+import tempfile
+import time
+import uuid
 
 from itertools import chain
 from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process
 from pathlib import Path
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
@@ -61,6 +63,9 @@ MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
 MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
 OS_DIRECTORY_TO_INDEX = os.environ.get("OS_DIRECTORY_TO_INDEX", "/data")
 RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "3600"))
+DOCUMENT_ID_XATTR_FIELD = "user.0819870_xyz.index_id"
+DOCUMENT_XATTR_FIELD = "user.0819870_xyz.indexed_document"
+
 
 client = None
 index = None
@@ -85,9 +90,8 @@ async def init_meili():
 
     filterable_attributes = [
         "id", 
-        "mime", 
-        "ctime", 
-        "mtime", 
+        "type", 
+        "modified_date", 
         "size",
         "name",
         "url",
@@ -96,7 +100,7 @@ async def init_meili():
     try:
         logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
-        await index.update_sortable_attributes(["ctime", "mtime", "size"] + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules])))
+        await index.update_sortable_attributes(["modified_date", "size"] + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules])))
     except Exception:
         logging.exception(f"meili update index attrs failed")
         raise
@@ -186,13 +190,13 @@ async def get_all_pending_jobs(module):
     docs = []
     offset = 0
     limit = MEILISEARCH_BATCH_SIZE
-    mime_filter = " OR ".join([f"mime = '{mime}'" for mime in await module.get_supported_mime_types()])
-    fields = ["url", "mtime", "mime", "index_info"] + module.DATA_FIELD_NAMES
+    type_filter = " OR ".join([f"type = '{mime_type}'" for mime_type in await module.get_supported_mime_types()])
+    fields = ["url", "modified_date", "type", "index_info"] + module.DATA_FIELD_NAMES
     
     try:
         while True:
             response = await index.get_documents(
-                filter=mime_filter,
+                filter=type_filter,
                 limit=limit,
                 offset=offset,
                 fields=fields
@@ -233,11 +237,86 @@ def get_mime_magic(file_path):
     
     return mime_type
 
-def get_meili_id_from_relative_path(relative_path):
-    return hashlib.sha256(relative_path.encode()).hexdigest()
+XATTR_SUPPORTED = None
 
-def get_meili_id_from_file_path(file_path):
-    return get_meili_id_from_relative_path(get_relative_path_from_file_path(file_path))
+def check_xattr_supported():
+    global XATTR_SUPPORTED
+    if XATTR_SUPPORTED is None:
+        try:
+            with tempfile.NamedTemporaryFile() as temp_file:
+                test_attr_name = "user.test"
+                os.setxattr(temp_file.name, test_attr_name, b"test")
+                os.removexattr(temp_file.name, test_attr_name)
+            XATTR_SUPPORTED = True
+        except (AttributeError, OSError):
+            XATTR_SUPPORTED = False
+            logging.warning("xattr operations are not supported on this system.")
+
+check_xattr_supported()
+
+def read_document_id_from_xattr(file_path):
+    if not XATTR_SUPPORTED:
+        return None
+    try:
+        data = os.getxattr(file_path, DOCUMENT_ID_XATTR_FIELD)
+        document_id = data.decode('utf-8')
+        return document_id
+    except OSError:
+        return None
+    except Exception as e:
+        logging.exception(f"Failed to read document ID from xattr on {file_path}: {e}")
+        return None
+
+def write_document_id_to_xattr(file_path, document_id):
+    if not XATTR_SUPPORTED:
+        return
+    try:
+        data = document_id.encode('utf-8')
+        os.setxattr(file_path, DOCUMENT_ID_XATTR_FIELD, data)
+    except Exception as e:
+        logging.exception(f"Failed to write document ID to xattr on {file_path}: {e}")
+
+def read_document_from_xattr(file_path):
+    if not XATTR_SUPPORTED:
+        return None
+    try:
+        data = os.getxattr(file_path, DOCUMENT_XATTR_FIELD)
+        document = json.loads(data.decode('utf-8'))
+        return document
+    except OSError:
+        return None
+    except Exception as e:
+        logging.exception(f"Failed to read xattr from {file_path}: {e}")
+        return None
+
+def write_document_to_xattr(file_path, document):
+    if not XATTR_SUPPORTED:
+        return
+    try:
+        data = json.dumps(document).encode('utf-8')
+        os.setxattr(file_path, DOCUMENT_XATTR_FIELD, data)
+    except Exception as e:
+        logging.exception(f"Failed to write xattr to {file_path}: {e}")
+
+def deep_update(original, update):
+    for key, value in update.items():
+        if isinstance(value, dict) and key in original and isinstance(original[key], dict):
+            deep_update(original[key], value)
+        else:
+            original[key] = value
+
+def patch_document_in_xattr(file_path, patch_dict):
+    if not XATTR_SUPPORTED:
+        return
+    try:
+        document = read_document_from_xattr(file_path)
+        if document is None:
+            document = patch_dict.copy()
+        else:
+            deep_update(document, patch_dict)
+        write_document_to_xattr(file_path, document)
+    except Exception as e:
+        logging.exception(f"Failed to patch xattr document for {file_path}: {e}")
 
 def get_file_path_from_meili_doc(doc):
     return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{OS_DIRECTORY_TO_INDEX}/")).as_posix()
@@ -278,14 +357,14 @@ async def sync_meili_docs():
                 if entry.is_dir(follow_symlinks=False):
                     directory_stack.append(entry.path)
                 elif entry.is_file(follow_symlinks=False):
-                    id = get_meili_id_from_file_path(entry.path)
+                    id = read_document_id_from_xattr(entry.path)
                     path_mtime = Path(entry.path).stat().st_mtime
-                    if id not in expected_documents_by_id or not math.isclose(expected_documents_by_id[id]["mtime"], path_mtime, abs_tol=1e-7 or expected_documents_by_id[id]["index_info"]["version"] != VERSION):
+                    if id not in expected_documents_by_id or not math.isclose(expected_documents_by_id[id]["modified_date"], path_mtime, abs_tol=1e-7 or expected_documents_by_id[id]["index_info"]["version"] != VERSION):
                         task = asyncio.create_task(async_create_meili_doc_from_file_path(entry.path))
                         create_document_tasks.append(task)
                         if id not in expected_documents_by_id:
                             added_document_ids.add(id)
-                        elif not math.isclose(expected_documents_by_id[id]["mtime"], path_mtime, abs_tol=1e-7):
+                        elif not math.isclose(expected_documents_by_id[id]["modified_date"], path_mtime, abs_tol=1e-7):
                             updated_document_ids.add(id)
                     current_file_paths.add(entry.path)
         except Exception:
@@ -296,7 +375,7 @@ async def sync_meili_docs():
         added_or_updated_documents = [task.result() for task in done if task.result() is not None]
 
     deleted_file_paths = previous_file_paths - current_file_paths
-    deleted_document_ids = {get_meili_id_from_file_path(fp) for fp in deleted_file_paths}
+    deleted_document_ids = {read_document_id_from_xattr(fp) for fp in deleted_file_paths}
 
     await delete_docs_by_id_meili(list(deleted_document_ids | updated_document_ids))
     await wait_for_idle_meili()
@@ -308,26 +387,39 @@ async def sync_meili_docs():
     logging.info(f"meili updated {len(updated_document_ids)}")
     logging.info(f"meili deleted {len(deleted_document_ids)}")
     logging.info(f"meili now has {total_expected_documents}")
-
+    
 def create_meili_doc_from_file_path(file_path):
     try:
         path = Path(file_path)
         relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
         stat = path.stat()
         current_mtime = stat.st_mtime
-        mime = get_mime_magic(path)
-        doc_id = get_meili_id_from_relative_path(relative_path)
-        
-        document = {
-            "id": doc_id,
-            "name": path.name,
-            "size": stat.st_size,
-            "mtime": current_mtime,
-            "ctime": stat.st_ctime,
-            "url": get_url_from_relative_path(relative_path),
-            "mime": mime,
-            "index_info": { "version": VERSION }
-        }
+        mime_type = get_mime_magic(path)
+
+        existing_document = read_document_from_xattr(file_path)
+        if existing_document is not None:
+            existing_document["name"] = path.name
+            existing_document["size"] = stat.st_size
+            existing_document["modified_date"] = current_mtime
+            existing_document["url"] = get_url_from_relative_path(relative_path)
+            existing_document["type"] = mime_type
+            existing_document["relative_path"] = relative_path
+            document = existing_document
+        else:
+            doc_id = str(uuid.uuid4())
+            write_document_id_to_xattr(file_path, doc_id)
+            document = {
+                "id": doc_id,
+                "name": path.name,
+                "size": stat.st_size,
+                "modified_date": current_mtime,
+                "url": get_url_from_relative_path(relative_path),
+                "type": mime_type,
+                "relative_path": relative_path,
+                "index_info": { "version": VERSION }
+            }
+
+        write_document_to_xattr(file_path, document)
         return document
     except Exception:
         logging.exception(f'os create doc failed "{file_path}"')
@@ -346,7 +438,7 @@ async def augment_meili_docs(module):
         pending_jobs = await get_all_pending_jobs(module)
         file_paths_with_mime = [
             [get_file_path_from_meili_doc(doc), doc]
-            for doc in sorted(pending_jobs, key=lambda x: x['mtime'], reverse=True)
+            for doc in sorted(pending_jobs, key=lambda x: x['modified_date'], reverse=True)
         ]
     except Exception:
         logging.exception(f"{module.NAME} failed to get pending files")
@@ -383,12 +475,15 @@ async def augment_meili_docs(module):
         failure = []
         not_found = []
         postponed = []
+        up_to_date = []
             
         for file_path, task in tasks_dict.items():
             try:
                 result = await task
                 if result == "success":
                     success.append(file_path)
+                elif result == "up-to-date":
+                    up_to_date.append(file_path)
                 elif result == "not found":
                     not_found.append(file_path)
             except asyncio.CancelledError:
@@ -396,15 +491,17 @@ async def augment_meili_docs(module):
             except Exception:
                 logging.exception( f"{module.NAME} failed at {file_path}")
                 failure.append(file_path)
-         
+        
+        if len(up_to_date) > 0:
+            logging.info( f"{module.NAME} {len(up_to_date)} files already up-to-date")
         if len(success) > 0:
-            logging.info( f"{module.NAME} {len(success)} files succeeded")
+            logging.info( f"{module.NAME} {len(success)} files update succeeded")
         if len(postponed) > 0:
-            logging.info( f"{module.NAME} {len(postponed)} files postponed")
+            logging.info( f"{module.NAME} {len(postponed)} files update postponed")
         if len(not_found) > 0:
             logging.warning( f"{module.NAME} {len(not_found)} files not found")
         if len(failure) > 0:
-            logging.error( f"{module.NAME} {len(failure)} files failed")
+            logging.error( f"{module.NAME} {len(failure)} files update failed")
     except Exception:
         logging.exception(f'{module.NAME} failed')
 
@@ -421,15 +518,28 @@ async def augment_meili_doc_from_file_path(file_path, doc, module):
     
     logging.debug(f'{module.NAME} started "{relative_path}"')
     
-    id = get_meili_id_from_relative_path(relative_path)
+    id = read_document_id_from_xattr(file_path)
 
     if not path.exists():
         return "not found"
     
-    mime = doc['mime']
-    info = doc['index_info'][module.NAME] if module.NAME in doc['index_info'] else None
+    mime_type = doc['type']
+    
+    if module.NAME in doc['index_info']:
+        info = doc['index_info'][module.NAME]
+    else:
+        existing_document = read_document_from_xattr(file_path)
+        if module.NAME in existing_document['index_info']:
+            await add_or_update_doc_meili(existing_document)
+            doc = existing_document
+            info = doc['index_info'][module.NAME]
+        else:
+            info = None
 
-    async for fields, info in module.get_fields(file_path, mime, info, doc):
+    yielded = False
+
+    async for fields, info in module.get_fields(file_path, mime_type, info, doc):
+        yielded = True
         if not path.exists():
             return "not found"
         
@@ -437,14 +547,15 @@ async def augment_meili_doc_from_file_path(file_path, doc, module):
         index_info[module.NAME] = info
         
         updated_doc = {
+            **(fields if fields is not None else {}),
             "id": id,
             "index_info": index_info,
-            **(fields if not fields is None else {}),
         }
         
+        patch_document_in_xattr(updated_doc)
         await add_or_update_doc_meili(updated_doc)
-        
-    return "success"
+    
+    return "success" if yielded else "up-to-date"
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
@@ -491,7 +602,7 @@ class EventHandler(FileSystemEventHandler):
         self.index.update_document(document)
 
     def delete_meili(self, file_path):
-        id = get_meili_id_from_file_path(file_path)
+        id = read_document_id_from_xattr(file_path)
         self.index.delete_document(id)
         
 def process_main():
