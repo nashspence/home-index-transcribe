@@ -15,35 +15,8 @@ import tempfile
 
 from pathlib import Path
 
-NAME = "scrape file bytes"
-DATA_FIELD_NAMES = [
-    'altitude',
-    'audio_bit_depth',
-    'audio_bit_rate',
-    'audio_channels',
-    'audio_codec',
-    'audio_sample_rate',
-    'camera_lens_make',
-    'camera_lens_model',
-    'creation_date',
-    'creation_date_format'
-    'creation_date_timezone_name',
-    'device_make',
-    'device_model',
-    'duration',
-    'embed_jpgfromraw_img',
-    'embed_preview_img',
-    'embed_thumbnail_img',
-    'height',
-    'image_byte_ranges',
-    'latitude',
-    'longitude',
-    'metadata_dump',
-    'video_bit_rate',
-    'video_codec',
-    'video_frame_rate',
-    'width'
-]
+NAME = "scrape_file_bytes"
+VERSION = 1
 FILTERABLE_FIELD_NAMES = [
     'altitude',
     'audio_bit_depth',
@@ -71,7 +44,6 @@ SORTABLE_FIELD_NAMES = [
     'duration',
     'creation_date'
 ]
-VERSION = 3
 
 AUDIO_MIME_TYPES = {
     "audio/aac", "audio/flac", "audio/mpeg", "audio/mp4", "audio/ogg", 
@@ -104,7 +76,7 @@ IMAGE_MIME_TYPES = {
     "image/x-sraw"
 }
 
-TIKA_SUPPORTED_MIME_TYPES = None # lazy - requested in get_supported_mime_types
+SUPPORTED_MIME_TYPES = None # lazy - requested in get_supported_mime_types
 
 ARCHIVE_MIME_TYPES = {
     'application/zip', 'application/x-tar', 'application/gzip',
@@ -958,7 +930,7 @@ async def scrape_with_tika(file_path, port=9998):
                             data = json[0]
                             keys_to_remove = [key for key in data if key.startswith("X-TIKA:EXCEPTION")]
                             for key in keys_to_remove:
-                                logging.warning(f"Problem scraping file bytes via Tika for '{file_path}': {key}: {data[key]}")
+                                logging.warning(f"Problem scraping file bytes via Tika for '{file_path}': {key}: {data[key].splitlines()[0]}")
                                 del data[key]
                             return data
                     else:
@@ -986,16 +958,21 @@ def debug(metadata, file_path, result, key_regex=default_key_regex, file_path_re
         logging.info(f'scrape file bytes DEBUG end ------------------------')
 
 async def init():
-    global tika_server_process, log_file
+    global SUPPORTED_MIME_TYPES, tika_server_process, log_file
     log_file = open('./data/logs/tika_server.log', 'w')
-    
     tika_server_process = subprocess.Popen(
         ['java', '-jar', '/tika-server.jar', '-p', '9998'],
         stdout=log_file,
         stderr=log_file
     )
-    
     await wait_for_tika_server()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'http://localhost:9998/mime-types', headers={"Accept": "application/json"}) as response:
+            if response.status == 200:
+                tika_mimes = await response.json()
+                SUPPORTED_MIME_TYPES = (set(tika_mimes.keys()) | VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES) - ARCHIVE_MIME_TYPES
+            else:
+                raise RuntimeError(f"Failed to retrieve MIME types: {response.status}")
 
 async def cleanup():
     global tika_server_process, log_file
@@ -1004,20 +981,16 @@ async def cleanup():
         tika_server_process.wait()
     if log_file:
         log_file.close()
-        
-async def get_supported_mime_types(port=9998):
-    global TIKA_SUPPORTED_MIME_TYPES
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f'http://localhost:{port}/mime-types', headers={"Accept": "application/json"}) as response:
-            if response.status == 200:
-                tika_mimes = await response.json()
-                TIKA_SUPPORTED_MIME_TYPES = set(tika_mimes.keys())
-                return list((TIKA_SUPPORTED_MIME_TYPES | VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES) - ARCHIVE_MIME_TYPES)
-            else:
-                raise RuntimeError(f"Failed to retrieve MIME types: {response.status}")
-
-async def get_fields(file_path, mime, info, doc):
-    if info and info.get("file_path") == file_path and info.get("version") == VERSION:
+    
+async def get_fields(file_path, module_save_path, document):
+    mime = document["type"]
+    if not mime in SUPPORTED_MIME_TYPES:
+        return
+    version = None
+    if module_save_path.exists() and (module_save_path / "version.json").exists():
+        with open(module_save_path / "version.json", 'r') as file:
+            version = json.load(file)
+    if version and version.get("file_path") == file_path and version.get("version") == VERSION:
         return
 
     try:
@@ -1029,7 +1002,7 @@ async def get_fields(file_path, mime, info, doc):
         if mime in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES:
             futures["ffprobe"] = asyncio.to_thread(scrape_with_ffprobe, file_path)
             futures["libmediainfo"] = asyncio.to_thread(scrape_with_libmediainfo, file_path)
-        if mime in TIKA_SUPPORTED_MIME_TYPES:
+        if mime in SUPPORTED_MIME_TYPES:
             futures["tika"] = scrape_with_tika(file_path)
 
         results = await asyncio.gather(*futures.values())
@@ -1041,13 +1014,20 @@ async def get_fields(file_path, mime, info, doc):
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_AUDIO)
         elif mime in IMAGE_MIME_TYPES:
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_IMAGE)
-        elif mime in TIKA_SUPPORTED_MIME_TYPES:
+        elif mime in SUPPORTED_MIME_TYPES:
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
          
         #debug(metadata, file_path, desired_fields, key_regex=None)
         
-        desired_fields['metadata_dump'] = json.dumps(metadata, separators=(',', ':'))
-        yield desired_fields, {"version": VERSION, "file_path": file_path}
+        with open(module_save_path / "version.json", 'w') as file:
+            json.dump({"version": VERSION, "file_path": file_path}, file, indent=4, separators=(", ", ": "))
+        with open(module_save_path / "metadata.json", 'w') as file:
+            json.dump(metadata, file, indent=4, separators=(", ", ": "))
+            
+        yield {
+            **document,
+            **(desired_fields if desired_fields is not None else {})
+        }
     except Exception:
         logging.exception(f'Failed to scrape file bytes {file_path}')
         raise

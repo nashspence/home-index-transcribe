@@ -18,8 +18,21 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+VERSION = 1
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "86400"))
+DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
+MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
+MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
+MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
+OS_DIRECTORY_TO_INDEX = os.environ.get("OS_DIRECTORY_TO_INDEX", "/data")
+METADATA_DATABASE_DIRECTORY = os.environ.get("METADATA_DATABASE_DIRECTORY", "/data/metadata")
+RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "3600"))
+DOCUMENT_ID_XATTR_FIELD = "user.0819870_xyz.index_id"
+
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
+if not os.path.exists(METADATA_DATABASE_DIRECTORY):
+    os.makedirs(METADATA_DATABASE_DIRECTORY)
 
 import scrape_file_bytes
 import transcribe_audio
@@ -54,18 +67,6 @@ file_handler = logging.FileHandler(f"./data/logs/watchdog.log")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(file_handler)
 logger.propagate = False
-
-VERSION = 1
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "86400"))
-DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
-MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
-MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
-MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
-OS_DIRECTORY_TO_INDEX = os.environ.get("OS_DIRECTORY_TO_INDEX", "/data")
-RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "3600"))
-DOCUMENT_ID_XATTR_FIELD = "user.0819870_xyz.index_id"
-DOCUMENT_XATTR_FIELD = "user.0819870_xyz.indexed_document"
-
 
 client = None
 index = None
@@ -183,33 +184,6 @@ async def get_all_docs_meili():
         logging.exception(f"meili get documents failed")
         raise
 
-async def get_all_pending_jobs(module):
-    if not index:
-        raise Exception("meili index did not init")
-    
-    docs = []
-    offset = 0
-    limit = MEILISEARCH_BATCH_SIZE
-    type_filter = " OR ".join([f"type = '{mime_type}'" for mime_type in await module.get_supported_mime_types()])
-    fields = ["url", "modified_date", "type", "index_info"] + module.DATA_FIELD_NAMES
-    
-    try:
-        while True:
-            response = await index.get_documents(
-                filter=type_filter,
-                limit=limit,
-                offset=offset,
-                fields=fields
-            )
-            docs.extend(response.results)
-            if len(response.results) < limit:
-                break
-            offset += limit
-        return docs
-    except Exception:
-        logging.exception(f"meili get documents failed")
-        raise
-
 async def wait_for_idle_meili():
     if not client:
         raise Exception("meili index did not init")
@@ -276,47 +250,48 @@ def write_document_id_to_xattr(file_path, document_id):
     except Exception as e:
         logging.exception(f"Failed to write document ID to xattr on {file_path}: {e}")
 
-def read_document_from_xattr(file_path):
-    if not XATTR_SUPPORTED:
-        return None
+def read_versions_json_for_file_path(file_path):
+    id = read_document_id_from_xattr(file_path)
+    
     try:
-        data = os.getxattr(file_path, DOCUMENT_XATTR_FIELD)
-        document = json.loads(data.decode('utf-8'))
-        return document
-    except OSError:
+        with open(f'{METADATA_DATABASE_DIRECTORY}/{id}/version.json', 'r') as file:
+            return json.load(file)
+    except Exception as e:
         return None
+    
+def write_versions_json_for_file_path(file_path, dict):
+    id = read_document_id_from_xattr(file_path)
+    
+    metadata_directory_path = f'{METADATA_DATABASE_DIRECTORY}/{id}'
+    if not os.path.exists(metadata_directory_path):
+        os.makedirs(metadata_directory_path)
+    
+    if id:
+        with open(f'{METADATA_DATABASE_DIRECTORY}/{id}/version.json', 'w') as file:
+            return json.dump(dict, file, indent=4, separators=(", ", ": "))
+    else:
+        raise Exception("no id available")
+    
+def read_document_json_for_file_path(file_path):
+    id = read_document_id_from_xattr(file_path)
+    try:
+        with open(f'{METADATA_DATABASE_DIRECTORY}/{id}/document.json', 'r') as file:
+            return json.load(file)
     except Exception as e:
-        logging.exception(f"Failed to read xattr from {file_path}: {e}")
         return None
-
-def write_document_to_xattr(file_path, document):
-    if not XATTR_SUPPORTED:
-        return
-    try:
-        data = json.dumps(document).encode('utf-8')
-        os.setxattr(file_path, DOCUMENT_XATTR_FIELD, data)
-    except Exception as e:
-        logging.exception(f"Failed to write xattr to {file_path}: {e}")
-
-def deep_update(original, update):
-    for key, value in update.items():
-        if isinstance(value, dict) and key in original and isinstance(original[key], dict):
-            deep_update(original[key], value)
-        else:
-            original[key] = value
-
-def patch_document_in_xattr(file_path, patch_dict):
-    if not XATTR_SUPPORTED:
-        return
-    try:
-        document = read_document_from_xattr(file_path)
-        if document is None:
-            document = patch_dict.copy()
-        else:
-            deep_update(document, patch_dict)
-        write_document_to_xattr(file_path, document)
-    except Exception as e:
-        logging.exception(f"Failed to patch xattr document for {file_path}: {e}")
+    
+def write_document_json_for_file_path(file_path, dict):
+    id = read_document_id_from_xattr(file_path)
+    
+    metadata_directory_path = f'{METADATA_DATABASE_DIRECTORY}/{id}'
+    if not os.path.exists(metadata_directory_path):
+        os.makedirs(metadata_directory_path)
+    
+    if id:
+        with open(f'{METADATA_DATABASE_DIRECTORY}/{id}/document.json', 'w') as file:
+            return json.dump(dict, file, indent=4, separators=(", ", ": "))
+    else:
+        raise Exception("no id available")
 
 def get_file_path_from_meili_doc(doc):
     return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{OS_DIRECTORY_TO_INDEX}/")).as_posix()
@@ -336,6 +311,7 @@ async def sync_meili_docs():
     previous_file_paths = {get_file_path_from_meili_doc(doc) for doc in expected_documents}
     current_file_paths = set()
     added_document_ids = set()
+    restored_document_ids = set()
     updated_document_ids = set()
     create_document_tasks = []
     added_or_updated_documents = []
@@ -355,14 +331,27 @@ async def sync_meili_docs():
             entries = await asyncio.to_thread(lambda: list(os.scandir(dir_path)))
             for entry in entries:
                 if entry.is_dir(follow_symlinks=False):
-                    directory_stack.append(entry.path)
+                    if entry.path != METADATA_DATABASE_DIRECTORY:
+                        directory_stack.append(entry.path)
                 elif entry.is_file(follow_symlinks=False):
                     id = read_document_id_from_xattr(entry.path)
-                    path_mtime = Path(entry.path).stat().st_mtime
-                    if id not in expected_documents_by_id or not math.isclose(expected_documents_by_id[id]["modified_date"], path_mtime, abs_tol=1e-7 or expected_documents_by_id[id]["index_info"]["version"] != VERSION):
+                    entry_path = Path(entry.path)
+                    path_mtime = entry_path.stat().st_mtime
+                    document = read_document_json_for_file_path(entry.path)
+                    version = read_versions_json_for_file_path(entry.path)
+                    if (
+                        id and
+                        document and 
+                        version and 
+                        id not in expected_documents_by_id and
+                        math.isclose(document["modified_date"], path_mtime, abs_tol=1e-7)
+                    ):
+                        restored_document_ids.add(id)
+                        added_or_updated_documents.append(document)
+                    else:
                         task = asyncio.create_task(async_create_meili_doc_from_file_path(entry.path))
                         create_document_tasks.append(task)
-                        if id not in expected_documents_by_id:
+                        if not id or id not in expected_documents_by_id:
                             added_document_ids.add(id)
                         elif not math.isclose(expected_documents_by_id[id]["modified_date"], path_mtime, abs_tol=1e-7):
                             updated_document_ids.add(id)
@@ -372,7 +361,7 @@ async def sync_meili_docs():
 
     if len(create_document_tasks) > 0:
         done, _ = await asyncio.wait(create_document_tasks)
-        added_or_updated_documents = [task.result() for task in done if task.result() is not None]
+        added_or_updated_documents = added_or_updated_documents.extend([task.result() for task in done if task.result() is not None])
 
     deleted_file_paths = previous_file_paths - current_file_paths
     deleted_document_ids = {read_document_id_from_xattr(fp) for fp in deleted_file_paths}
@@ -383,6 +372,7 @@ async def sync_meili_docs():
     await wait_for_idle_meili()
 
     total_expected_documents = await get_doc_count_meili()
+    logging.info(f'meili restored {len(restored_document_ids)} from "{METADATA_DATABASE_DIRECTORY}"')
     logging.info(f"meili added {len(added_document_ids)}")
     logging.info(f"meili updated {len(updated_document_ids)}")
     logging.info(f"meili deleted {len(deleted_document_ids)}")
@@ -396,30 +386,25 @@ def create_meili_doc_from_file_path(file_path):
         current_mtime = stat.st_mtime
         mime_type = get_mime_magic(path)
 
-        existing_document = read_document_from_xattr(file_path)
-        if existing_document is not None:
-            existing_document["name"] = path.name
-            existing_document["size"] = stat.st_size
-            existing_document["modified_date"] = current_mtime
-            existing_document["url"] = get_url_from_relative_path(relative_path)
-            existing_document["type"] = mime_type
-            existing_document["relative_path"] = relative_path
-            document = existing_document
-        else:
+        doc_id = read_document_id_from_xattr(file_path)
+        if not doc_id:
             doc_id = str(uuid.uuid4())
             write_document_id_to_xattr(file_path, doc_id)
-            document = {
-                "id": doc_id,
-                "name": path.name,
-                "size": stat.st_size,
-                "modified_date": current_mtime,
-                "url": get_url_from_relative_path(relative_path),
-                "type": mime_type,
-                "relative_path": relative_path,
-                "index_info": { "version": VERSION }
-            }
+        
+        document = {
+            "id": doc_id,
+            "name": path.name,
+            "modified_date": current_mtime,
+            "size": stat.st_size,
+            "type": mime_type,
+            "url": get_url_from_relative_path(relative_path),
+        }
+        
+        version = { "version": VERSION }
+        
+        write_document_json_for_file_path(file_path, document)
+        write_versions_json_for_file_path(file_path, version)
 
-        write_document_to_xattr(file_path, document)
         return document
     except Exception:
         logging.exception(f'os create doc failed "{file_path}"')
@@ -432,36 +417,31 @@ async def augment_meili_docs(module):
     except Exception:
         logging.exception(f"{module.NAME} init failed")
         return
-    
-    try:
-        logging.debug(f"{module.NAME} get pending files")
-        pending_jobs = await get_all_pending_jobs(module)
-        file_paths_with_mime = [
-            [get_file_path_from_meili_doc(doc), doc]
-            for doc in sorted(pending_jobs, key=lambda x: x['modified_date'], reverse=True)
-        ]
-    except Exception:
-        logging.exception(f"{module.NAME} failed to get pending files")
-        return
-
-    if not file_paths_with_mime:
-        return
-
-    logging.info(f"{module.NAME} started for {len(file_paths_with_mime)} files")
 
     try:
         semaphore = asyncio.Semaphore(32)
 
-        async def sem_task(fp):
+        async def sem_task(file_path, metadata_dir_path, document):
             async with semaphore:
-                return await augment_meili_doc_from_file_path(fp[0], fp[1], module)
+                return await augment_meili_doc_from_file_path(file_path, metadata_dir_path, document, module)
             
         tasks_dict = {}
         tasks_list = []
+        
+        dirs_with_mtime = []
+        for metadata_dir_path in Path(METADATA_DATABASE_DIRECTORY).iterdir():
+            if metadata_dir_path.is_dir() and (metadata_dir_path / "document.json").exists():
+                mtime = os.stat(metadata_dir_path / "document.json").st_mtime
+                with open(metadata_dir_path / "document.json", 'r') as file:
+                    document = json.load(file)
+                dirs_with_mtime.append((metadata_dir_path, document, mtime))
 
-        for fp in file_paths_with_mime:
-            task = asyncio.create_task(sem_task(fp))
-            tasks_dict[fp[0]] = task
+        dirs_with_mtime.sort(key=lambda x: x[2], reverse=True)
+
+        for metadata_dir_path, document, _ in dirs_with_mtime:
+            file_path = get_file_path_from_meili_doc(document)
+            task = asyncio.create_task(sem_task(file_path, metadata_dir_path, document))
+            tasks_dict[file_path] = task
             tasks_list.append(task)
         
         _, postponed_tasks = await asyncio.wait(tasks_list, timeout=ALLOWED_TIME_PER_MODULE)
@@ -512,50 +492,27 @@ async def augment_meili_docs(module):
         logging.exception(f"{module.NAME} cleanup failed")
         return
 
-async def augment_meili_doc_from_file_path(file_path, doc, module):    
+async def augment_meili_doc_from_file_path(file_path, metadata_dir_path, document, module):
     path = Path(file_path)
     relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
-    
     logging.debug(f'{module.NAME} started "{relative_path}"')
     
-    id = read_document_id_from_xattr(file_path)
-
     if not path.exists():
         return "not found"
     
-    mime_type = doc['type']
-    
-    if module.NAME in doc['index_info']:
-        info = doc['index_info'][module.NAME]
-    else:
-        existing_document = read_document_from_xattr(file_path)
-        if module.NAME in existing_document['index_info']:
-            await add_or_update_doc_meili(existing_document)
-            doc = existing_document
-            info = doc['index_info'][module.NAME]
-        else:
-            info = None
+    module_save_path = Path(metadata_dir_path) / module.NAME
+    if not os.path.exists(module_save_path):
+        os.makedirs(module_save_path)
 
-    yielded = False
-
-    async for fields, info in module.get_fields(file_path, mime_type, info, doc):
-        yielded = True
+    updated = False
+    async for document in module.get_fields(file_path, module_save_path, document):
+        updated = True
         if not path.exists():
             return "not found"
-        
-        index_info = doc['index_info']
-        index_info[module.NAME] = info
-        
-        updated_doc = {
-            **(fields if fields is not None else {}),
-            "id": id,
-            "index_info": index_info,
-        }
-        
-        patch_document_in_xattr(updated_doc)
-        await add_or_update_doc_meili(updated_doc)
+        write_document_json_for_file_path(file_path, document)
+        await add_or_update_doc_meili(document)
     
-    return "success" if yielded else "up-to-date"
+    return "success" if updated else "up-to-date"
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
