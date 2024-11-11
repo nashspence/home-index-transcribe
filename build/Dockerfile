@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     libmediainfo0v5 \
     openjdk-17-jre-headless \
     poppler-utils \
+    tzdata \
     shared-mime-info \
     && apt-get clean
 
@@ -36,14 +37,13 @@ RUN pip install \
     pymediainfo \
     python-magic \
     wand \
-    watchdog
+    watchdog \
+    xxhash
 
 COPY index.py .
 COPY modules .
 
-RUN wget http://search.maven.org/remotecontent?filepath=org/apache/tika/tika-server-standard/2.6.0/tika-server-standard-2.6.0.jar -O /tika-server.jar
+RUN wget https://repo1.maven.org/maven2/org/apache/tika/tika-app/3.0.0/tika-app-3.0.0.jar -O /tika-app.jar
 
-ENV TIKA_SERVER_ENDPOINT='http://localhost:9998'
-ENV TIKA_CLIENT_ONLY=True
 ENV PYTHONPATH="/app/modules:${PYTHONPATH}"
 ENTRYPOINT ["/usr/local/bin/python", "/app/index.py"]
