@@ -3,13 +3,12 @@ import datetime
 import json
 import logging
 import magic
-import math
 import mimetypes
 import os
 import shutil
-import tempfile
+import sqlite3
 import time
-import uuid
+import xxhash
 
 from collections import defaultdict
 from itertools import chain
@@ -20,23 +19,23 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-
 VERSION = 1
+
 ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "86400"))
+ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "/data/archive")
+CACHE_FILE_PATH = os.environ.get("CACHE_FILE_PATH", "/data/metadata/cache")
 DOMAIN = os.environ.get("DOMAIN", "private.0819870.xyz")
+INDEX_DIRECTORY = os.environ.get("INDEX_DIRECTORY", "/data")
 MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://meilisearch:7700")
 MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
-OS_DIRECTORY_TO_INDEX = os.environ.get("OS_DIRECTORY_TO_INDEX", "/data")
-METADATA_DATABASE_DIRECTORY = os.environ.get("METADATA_DATABASE_DIRECTORY", "/data/metadata")
-ARCHIVE_DIRECTORY = os.environ.get("METADATA_DATABASE_DIRECTORY", "/data/archive")
+METADATA_DIRECTORY = os.environ.get("METADATA_DIRECTORY", "/data/metadata")
 RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "3600"))
-DOCUMENT_ID_XATTR_FIELD = "user.0819870_xyz.index_id"
 
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
-if not os.path.exists(METADATA_DATABASE_DIRECTORY):
-    os.makedirs(METADATA_DATABASE_DIRECTORY)
+if not os.path.exists(METADATA_DIRECTORY):
+    os.makedirs(METADATA_DIRECTORY)
 
 import scrape_file_bytes
 import transcribe_audio
@@ -137,7 +136,7 @@ async def init_meili():
         logging.exception(f"meili update index attrs failed")
         raise
 
-async def get_doc_count_meili():
+async def get_document_count():
     if not index:
         raise Exception("meili index did not init")
     
@@ -148,7 +147,7 @@ async def get_doc_count_meili():
         logging.exception(f"meili get stats failed")
         raise
 
-async def add_or_update_doc_meili(doc):
+async def add_or_update_document(doc):
     if not index:
         raise Exception("meili index did not init")
     
@@ -159,7 +158,7 @@ async def add_or_update_doc_meili(doc):
             logging.exception(f"meili update documents failed")
             raise
 
-async def add_or_update_docs_meili(docs):
+async def add_or_update_documents(docs):
     if not index:
         raise Exception("meili index did not init")
     
@@ -172,7 +171,7 @@ async def add_or_update_docs_meili(docs):
             logging.exception(f"meili update documents failed")
             raise
 
-async def delete_docs_by_id_meili(ids):
+async def delete_documents_by_id(ids):
     if not index:
         raise Exception("meili index did not init")
     
@@ -185,7 +184,7 @@ async def delete_docs_by_id_meili(ids):
         logging.exception(f"meili delete documents failed")
         raise
 
-async def get_doc_meili(doc_id):
+async def get_document(doc_id):
     if not index:
         raise Exception("meili index did not init")
     
@@ -196,7 +195,7 @@ async def get_doc_meili(doc_id):
         logging.exception(f"meili get document failed")
         raise
 
-async def get_all_docs_meili():
+async def get_all_documents():
     if not index:
         raise Exception("meili index did not init")
     
@@ -215,7 +214,7 @@ async def get_all_docs_meili():
         logging.exception(f"meili get documents failed")
         raise
 
-async def wait_for_idle_meili():
+async def wait_for_meili_idle():
     if not client:
         raise Exception("meili index did not init")
     
@@ -230,7 +229,7 @@ async def wait_for_idle_meili():
         logging.exception(f"meili wait for idle failed")
         raise
 
-def get_mime_magic(file_path):
+def get_mime_type(file_path):
     mime = magic.Magic(mime=True)
     mime_type = mime.from_file(file_path)
     
@@ -242,365 +241,246 @@ def get_mime_magic(file_path):
     
     return mime_type
 
-XATTR_SUPPORTED = None
-
-def check_xattr_supported():
-    global XATTR_SUPPORTED
-    if XATTR_SUPPORTED is None:
-        try:
-            with tempfile.NamedTemporaryFile() as temp_file:
-                test_attr_name = "user.test"
-                os.setxattr(temp_file.name, test_attr_name, b"test")
-                os.removexattr(temp_file.name, test_attr_name)
-            XATTR_SUPPORTED = True
-        except (AttributeError, OSError):
-            XATTR_SUPPORTED = False
-            logging.warning("xattr operations are not supported on this system.")
-
-check_xattr_supported()
-
-def read_document_id_from_xattr(file_path):
-    if not XATTR_SUPPORTED:
-        return None
+def read_version_json(id):    
     try:
-        data = os.getxattr(file_path, DOCUMENT_ID_XATTR_FIELD)
-        document_id = data.decode('utf-8')
-        return document_id
-    except OSError:
-        return None
-    except Exception as e:
-        logging.exception(f"Failed to read document ID from xattr on {file_path}: {e}")
-        return None
-
-def write_document_id_to_xattr(file_path, document_id):
-    if not XATTR_SUPPORTED:
-        return
-    try:
-        original_stat = os.stat(file_path)
-        original_mtime = original_stat.st_mtime
-        original_atime = original_stat.st_atime
-        data = document_id.encode('utf-8')
-        os.setxattr(file_path, DOCUMENT_ID_XATTR_FIELD, data)
-        os.utime(file_path, (original_atime, original_mtime))
-    except Exception as e:
-        logging.exception(f"Failed to write document ID to xattr on {file_path}: {e}")
-
-def read_versions_json_for_file_path(file_path):
-    id = read_document_id_from_xattr(file_path)
-    
-    try:
-        with open(os.path.join(METADATA_DATABASE_DIRECTORY, id, 'version.json'), 'r') as file:
+        with open(os.path.join(METADATA_DIRECTORY, id, 'version.json'), 'r') as file:
             return json.load(file)
     except Exception as e:
         return None
     
-def write_versions_json_for_file_path(file_path, dict):
-    id = read_document_id_from_xattr(file_path)
-    
-    metadata_directory_path = f'{METADATA_DATABASE_DIRECTORY}/{id}'
+def write_version_json(id, dict):    
+    metadata_directory_path = f'{METADATA_DIRECTORY}/{id}'
     if not os.path.exists(metadata_directory_path):
         os.makedirs(metadata_directory_path)
+    with open(os.path.join(METADATA_DIRECTORY, id, 'version.json'), 'w') as file:
+        return json.dump(dict, file, indent=4, separators=(", ", ": "))
     
-    if id:
-        with open(os.path.join(METADATA_DATABASE_DIRECTORY, id, 'version.json'), 'w') as file:
-            return json.dump(dict, file, indent=4, separators=(", ", ": "))
-    else:
-        raise Exception("no id available")
-    
-def read_document_json_for_file_path(file_path):
-    id = read_document_id_from_xattr(file_path)
+def read_document_json(id):
     try:
-        with open(os.path.join(METADATA_DATABASE_DIRECTORY, id, 'document.json'), 'r') as file:
+        with open(os.path.join(METADATA_DIRECTORY, id, 'document.json'), 'r') as file:
             return json.load(file)
     except Exception as e:
         return None
     
-def write_document_json_for_file_path(file_path, dict):
-    id = read_document_id_from_xattr(file_path)
-    
-    metadata_directory_path = f'{METADATA_DATABASE_DIRECTORY}/{id}'
+def write_document_json(id, dict):    
+    metadata_directory_path = f'{METADATA_DIRECTORY}/{id}'
     if not os.path.exists(metadata_directory_path):
         os.makedirs(metadata_directory_path)
-    
-    if id:
-        with open(os.path.join(METADATA_DATABASE_DIRECTORY, id, 'document.json'), 'w') as file:
-            return json.dump(dict, file, indent=4, separators=(", ", ": "))
-    else:
-        raise Exception("no id available")
+    with open(os.path.join(METADATA_DIRECTORY, id, 'document.json'), 'w') as file:
+        return json.dump(dict, file, indent=4, separators=(", ", ": "))
 
-def get_file_path_from_meili_doc(doc):
-    return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{OS_DIRECTORY_TO_INDEX}/")).as_posix()
+def path_from_meili_doc(doc):
+    return Path(doc['url'].replace(f"https://{DOMAIN}/", f"{INDEX_DIRECTORY}/")).as_posix()
 
-def get_relative_path_from_meili_doc(doc):
-    return get_relative_path_from_url(doc['url'])
-
-def get_relative_path_from_url(url):
+def relative_path_from_url(url):
     return Path(url.replace(f"https://{DOMAIN}/", "")).as_posix()
 
-def get_url_from_relative_path(relative_path):
+def url_from_relative_path(relative_path):
     return f"https://{DOMAIN}/{relative_path}"
 
-def get_url_from_file_path(file_path):
-    return get_url_from_relative_path(os.path.relpath(file_path, OS_DIRECTORY_TO_INDEX))
+def init_hash_cache_sqlite3():
+    with sqlite3.connect(CACHE_FILE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS hash_cache (
+                file_path TEXT PRIMARY KEY,
+                mtime INTEGER,
+                hash TEXT
+            )
+        ''')
+        conn.commit()
 
-def get_relative_path_from_file_path(file_path):
-    return Path(file_path).relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
+def upsert_into_cache(file_path, mtime, file_hash):
+    with sqlite3.connect(CACHE_FILE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO hash_cache (file_path, mtime, hash)
+            VALUES (?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET mtime=excluded.mtime, hash=excluded.hash
+        ''', (file_path, mtime, file_hash))
+        conn.commit()
 
-async def sync_meili_docs():
-    expected_documents = await get_all_docs_meili()
-    expected_documents_by_id = {doc["id"]: doc for doc in expected_documents}
-    expected_document_ids = set(expected_documents_by_id.keys())
-    current_document_ids = set()
-    documents_to_delete_ids = set()
-    added_or_updated_documents = []
-    restored_document_ids = set()
-    current_file_paths = set()
-
-    logging.info(f"meili has {len(expected_documents)} documents")
-
-    directory_stack = [OS_DIRECTORY_TO_INDEX]
-    all_files_info = []
-
-    while directory_stack:
-        dir_path = directory_stack.pop()
-        try:
-            entries = await asyncio.to_thread(lambda: list(os.scandir(dir_path)))
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    if entry.path != METADATA_DATABASE_DIRECTORY:
-                        directory_stack.append(entry.path)
-                elif entry.is_file(follow_symlinks=False):
-                    file_info = gather_file_info(entry.path)
-                    if file_info:
-                        all_files_info.append(file_info)
-                        current_file_paths.add(entry.path)
-        except Exception:
-            logging.exception(f'failed to scan directory "{dir_path}"')
-
-    files_by_id = defaultdict(list)
-    for file_info in all_files_info:
-        files_by_id[file_info['id']].append(file_info)
-
-    if None in files_by_id:
-        for file_info in files_by_id.pop(None):
-            assign_new_id(file_info)
-            current_document_ids.add(file_info['id'])
-            document = process_document(file_info)
-            if document:
-                added_or_updated_documents.append(document)
-
-    for id, files in files_by_id.items():
-        if len(files) == 1:
-            file_info = files[0]
-            current_document_ids.add(id)
-            document = process_single_file(file_info)
-            if document:
-                added_or_updated_documents.append(document)
+def get_from_cache(file_path):
+    with sqlite3.connect(CACHE_FILE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT mtime, hash FROM hash_cache WHERE file_path = ?', (file_path,))
+        result = cursor.fetchone()
+        if result:
+            mtime, file_hash = result
+            return {'mtime': mtime, 'hash': file_hash}
         else:
-            current_document_ids.update(handle_duplicate_ids(id, files, added_or_updated_documents, documents_to_delete_ids))
+            return None
+        
+def delete_from_cache(file_path):
+    with sqlite3.connect(CACHE_FILE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM file_hash_cache WHERE file_path = ?', (file_path,))
+        conn.commit()
+    logging.debug(f'Deleted cache entry for file "{file_path}"')
 
-    documents_to_delete_ids.update(expected_document_ids - current_document_ids)
-
-    restored_document_ids.update(process_metadata_directory(
-        current_document_ids, expected_documents_by_id, added_or_updated_documents, documents_to_delete_ids))
-
-    documents_to_delete_ids_filtered = filter_archive_documents(documents_to_delete_ids, expected_documents_by_id)
-
-    await delete_documents(documents_to_delete_ids_filtered)
-    await add_or_update_docs_meili(added_or_updated_documents)
-    await wait_for_idle_meili()
-
-    total_expected_documents = await get_doc_count_meili()
-    logging.info(f"meili restored {len(restored_document_ids)} documents from '{METADATA_DATABASE_DIRECTORY}'")
-    logging.info(f"meili added or updated {len(added_or_updated_documents)} documents")
-    logging.info(f"meili deleted {len(documents_to_delete_ids_filtered)} documents")
-    logging.info(f"meili now has {total_expected_documents} documents")
+def compute_file_hash(file_path, mtime):
+    cache_entry = get_from_cache(file_path)
+    if cache_entry and cache_entry['mtime'] == mtime:
+        # Cache hit
+        file_hash = cache_entry['hash']
+        logging.debug(f'Cache hit for file "{file_path}" with mtime "{mtime}"')
+    else:
+        # Cache miss or mtime mismatch; recompute hash
+        logging.debug(f'Computing hash for file "{file_path}"')
+        hasher = xxhash.xxh64()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                hasher.update(chunk)
+        file_hash = hasher.hexdigest()
+        # Update the cache
+        upsert_into_cache(file_path, mtime, file_hash)
+    return file_hash
 
 def gather_file_info(file_path):
     try:
-        id = read_document_id_from_xattr(file_path)
-        entry_path = Path(file_path)
-        stat = entry_path.stat()
+        logging.debug(f'gathering file info for "{file_path}"')
+        stat = os.stat(file_path)
         mtime = stat.st_mtime
-        document = read_document_json_for_file_path(file_path)
-        version = read_versions_json_for_file_path(file_path)
+        file_hash = compute_file_hash(file_path, mtime)
         file_info = {
             'path': file_path,
-            'id': id,
             'mtime': mtime,
-            'document': document,
-            'version': version,
-            'stat': stat
+            'stat': stat,
+            'id': file_hash,
+            'document': read_document_json(file_path),
+            'version': read_version_json(file_path)
         }
+        logging.debug(f'file info for "{file_path}": id="{file_hash}", mtime="{mtime}"')
         return file_info
-    except Exception:
-        logging.exception(f'Failed to gather file info for "{file_path}"')
+    except Exception as e:
+        logging.exception(f'failed to gather file info for "{file_path}": {e}')
         return None
 
-def assign_new_id(file_info):
-    new_id = str(uuid.uuid4())
-    write_document_id_to_xattr(file_info['path'], new_id)
-    file_info['id'] = new_id
-
-def process_document(file_info, existing_document=None, copies_info=None):
+def get_document_for_hash(doc_id, file_infos):
     try:
-        path = Path(file_info['path'])
-        relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
-        current_mtime = file_info['mtime']
-        mime_type = get_mime_magic(path)
-        doc_id = file_info['id']
+        logging.debug(f'processing files with id "{doc_id}"')
+        urls = set()
+        mtimes = []
+        for file_info in file_infos:
+            relative_path = os.path.relpath(file_info['path'], INDEX_DIRECTORY)
+            url = url_from_relative_path(relative_path)
+            urls.add(url)
+            mtimes.append(file_info['mtime'])
+            logging.debug(f'file "{file_info["path"]}" contributes url "{url}" and mtime "{file_info["mtime"]}"')
 
-        document = {
-            "id": doc_id,
-            "modified_date": current_mtime,
-            "size": file_info['stat'].st_size,
-            "type": mime_type,
-            "url": get_url_from_relative_path(relative_path),
-        }
+        max_mtime = max(mtimes)
+        sample_file_info = file_infos[0]
+        mime_type = get_mime_type(sample_file_info['path'])
+        existing_document = sample_file_info.get('document')
 
-        if existing_document:
-            if 'copies' in existing_document:
-                document['copies'] = existing_document['copies']
-            if 'copies' in document and copies_info:
-                document['copies'].update(copies_info)
-            elif copies_info:
-                document['copies'] = copies_info
-        else:
-            if copies_info:
-                document['copies'] = copies_info
-            
-        version = {"version": VERSION}
-        
-        write_document_json_for_file_path(file_info['path'], document)
-        write_versions_json_for_file_path(file_info['path'], version)
+        document = existing_document or {}
+        document.update({
+            'id': doc_id,
+            'modified_date': max(max_mtime, document.get('modified_date', 0)),
+            'size': sample_file_info['stat'].st_size,
+            'type': mime_type,
+            'urls': list(urls.union(set(document.get('urls', []))))
+        })
 
+        version = {'version': VERSION}
+        write_document_json(doc_id, document)
+        write_version_json(doc_id, version)
+
+        logging.debug(f'processed document for id "{doc_id}" with urls "{document["urls"]}"')
         return document
-    except Exception:
-        logging.exception(f'Failed to process document for "{file_info["path"]}"')
+    except Exception as e:
+        logging.exception(f'failed to process documents for id "{doc_id}": {e}')
         return None
 
-def process_single_file(file_info):
-    current_url = get_url_from_relative_path(os.path.relpath(file_info['path'], OS_DIRECTORY_TO_INDEX))
-    document = file_info.get('document')
+def process_metadata_directory(current_doc_ids, existing_docs_by_id, documents_to_add_or_update, documents_to_delete_ids):
+    restored_doc_ids = set()
+    logging.debug('processing metadata directory')
 
-    if document:
-        if document['url'] != current_url and math.isclose(file_info['mtime'], document.get('modified_date', 0), abs_tol=1e-7):
-            document['url'] = current_url
-            write_document_json_for_file_path(file_info['path'], document)
-            return document
-        if not math.isclose(file_info['mtime'], document.get('modified_date', 0), abs_tol=1e-7):
-            return process_document(file_info, existing_document=document)
-        if 'copies' in document:
-            for key, value in document['copies'].items():
-                if not os.path.join(METADATA_DATABASE_DIRECTORY, value):
-                    del document['copies'][key]
-            if not document['copies']:
-                del document['copies']
-            write_document_json_for_file_path(document)
-            return document
-    else:
-        return process_document(file_info)
-        
-    return None
+    if not os.path.exists(METADATA_DIRECTORY):
+        logging.debug(f'metadata directory "{METADATA_DIRECTORY}" does not exist')
+        return restored_doc_ids
 
-def handle_duplicate_ids(id, files, added_or_updated_documents, documents_to_delete_ids):
-    new_ids = set()
-    mtimes = [f['mtime'] for f in files]
-    if all(ct == mtimes[0] for ct in mtimes):
-        # Can't determine original, assign new IDs to all
-        for file_info in files:
-            assign_new_id(file_info)
-            new_ids.add(file_info['id'])
-            document = process_document(file_info)
-            if document:
-                added_or_updated_documents.append(document)
-        documents_to_delete_ids.add(id)
-    else:
-        # Determine original and copies
-        files_sorted = sorted(files, key=lambda f: f['mtime'])
-        original_file = files_sorted[0]
-        new_ids.add(original_file['id'])
-        copies = files_sorted[1:]
-        copies_info = {}
-        for copy_file in copies:
-            assign_new_id(copy_file)
-            new_ids.add(copy_file['id'])
-            document = process_document(copy_file)
-            if document:
-                added_or_updated_documents.append(document)
-            copies_info[str(copy_file['mtime'])] = copy_file['id']
-        # Update original document with copies info
-        document = process_document(original_file, existing_document=original_file.get('document'), copies_info=copies_info)
-        if document:
-            added_or_updated_documents.append(document)
-    return new_ids
+    for entry in os.scandir(METADATA_DIRECTORY):
+        if entry.is_dir(follow_symlinks=False):
+            doc_id = entry.name
+            logging.debug(f'found metadata for doc_id "{doc_id}"')
+            document_json_path = os.path.join(entry.path, 'document.json')
+            if os.path.isfile(document_json_path):
+                with open(document_json_path, 'r') as f:
+                    document = json.load(f)
+                if doc_id in current_doc_ids:
+                    logging.debug(f'document "{doc_id}" already in current documents, skipping')
+                    continue
+                if doc_id not in existing_docs_by_id:
+                    restored = restore_document_from_metadata(doc_id, document, documents_to_add_or_update, documents_to_delete_ids)
+                    if restored:
+                        restored_doc_ids.add(doc_id)
+                        logging.debug(f'restored document "{doc_id}" from metadata')
+    return restored_doc_ids
 
-def process_metadata_directory(current_document_ids, expected_documents_by_id, added_or_updated_documents, documents_to_delete_ids):
-    restored_document_ids = set()
-    try:
-        entries = os.scandir(METADATA_DATABASE_DIRECTORY)
-        for entry in entries:
-            if entry.is_dir(follow_symlinks=False):
-                doc_id = entry.name
-                document_json_path = os.path.join(entry.path, 'document.json')
-                if os.path.isfile(document_json_path):
-                    with open(document_json_path, 'r') as f:
-                        document = json.load(f)
-                    if doc_id in current_document_ids:
-                        continue
-                    if doc_id not in expected_documents_by_id:
-                        restored = restore_document_from_metadata(doc_id, document, added_or_updated_documents, documents_to_delete_ids)
-                        if restored:
-                            restored_document_ids.add(doc_id)
-    except Exception:
-        logging.exception(f'Failed to scan METADATA_DATABASE_DIRECTORY "{METADATA_DATABASE_DIRECTORY}"')
-    return restored_document_ids
+def restore_document_from_metadata(doc_id, document, documents_to_add_or_update, documents_to_delete_ids):
+    urls = document.get('urls', [])
+    restored = False
+    logging.debug(f'restoring document "{doc_id}" from metadata with urls "{urls}"')
 
-def restore_document_from_metadata(doc_id, document, added_or_updated_documents, documents_to_delete_ids):
-    url = document['url']
-    file_path = get_file_path_from_meili_doc(document)
-    if os.path.exists(file_path):
-        file_info = gather_file_info(file_path)
-        if file_info:
-            # Update document with current file information
-            updated_document = process_document(file_info, existing_document=document)
-            if updated_document:
-                added_or_updated_documents.append(updated_document)
-                return True
-    else:
-        relative_path = get_relative_path_from_url(url)
-        if relative_path.startswith(ARCHIVE_DIRECTORY):
-            # Restore the document to MeiliSearch
-            added_or_updated_documents.append(document)
-            return True
+    for url in urls:
+        relative_path = relative_path_from_url(url)
+        file_path = os.path.join(INDEX_DIRECTORY, relative_path)
+        if os.path.exists(file_path):
+            file_info = gather_file_info(file_path)
+            if file_info:
+                # Update document with current file information
+                updated_document = get_document_for_hash(doc_id, [file_info])
+                if updated_document:
+                    documents_to_add_or_update.append(updated_document)
+                    restored = True
+                    logging.debug(f'updated document "{doc_id}" with file "{file_path}"')
         else:
-            # Delete the METADATA_DATABASE_DIRECTORY entry
-            metadata_entry_path = os.path.join(METADATA_DATABASE_DIRECTORY, doc_id)
-            shutil.rmtree(metadata_entry_path)
-            documents_to_delete_ids.add(doc_id)
-            return False
-    return False
+            if relative_path.startswith(ARCHIVE_DIRECTORY):
+                # Restore the document
+                documents_to_add_or_update.append(document)
+                restored = True
+                logging.debug(f'document "{doc_id}" is in archive, restored from metadata')
+            else:
+                # Delete the metadata entry
+                metadata_entry_path = os.path.join(METADATA_DIRECTORY, doc_id)
+                if os.path.exists(metadata_entry_path):
+                    shutil.rmtree(metadata_entry_path)
+                    logging.debug(f'deleted metadata for document "{doc_id}" as file "{file_path}" does not exist')
+                documents_to_delete_ids.add(doc_id)
+    return restored
 
-def filter_archive_documents(documents_to_delete_ids, expected_documents_by_id):
+def filter_documents_to_delete(documents_to_delete_ids, existing_docs_by_id):
     filtered_ids = set()
-    for id in documents_to_delete_ids:
-        document = expected_documents_by_id.get(id)
+    logging.debug('filtering documents to delete based on archive directory')
+
+    for doc_id in documents_to_delete_ids:
+        document = existing_docs_by_id.get(doc_id)
         if document:
-            url = document['url']
-            relative_path = get_relative_path_from_url(url)
-            if not relative_path.startswith(ARCHIVE_DIRECTORY):
-                filtered_ids.add(id)
+            urls = document.get('urls', [])
+            for url in urls:
+                relative_path = relative_path_from_url(url)
+                if not relative_path.startswith(ARCHIVE_DIRECTORY):
+                    filtered_ids.add(doc_id)
+                    logging.debug(f'document "{doc_id}" marked for deletion')
+                    break
     return filtered_ids
 
-async def delete_documents(documents_to_delete_ids_filtered):
-    await delete_docs_by_id_meili(list(documents_to_delete_ids_filtered))
-    await wait_for_idle_meili()
-    for doc_id in documents_to_delete_ids_filtered:
-        metadata_entry_path = os.path.join(METADATA_DATABASE_DIRECTORY, doc_id)
-        if os.path.exists(metadata_entry_path):
-            shutil.rmtree(metadata_entry_path)
+async def delete_documents(doc_ids):
+    if doc_ids:
+        logging.debug(f'deleting documents "{doc_ids}" from meili')    
+        await delete_documents_by_id(list(doc_ids))
+        await wait_for_meili_idle()
+        for doc_id in doc_ids:
+            metadata_entry_path = os.path.join(METADATA_DIRECTORY, doc_id)
+            if os.path.exists(metadata_entry_path):
+                shutil.rmtree(metadata_entry_path)
+                logging.debug(f'deleted metadata for document "{doc_id}"')
+            delete_from_cache(doc_id)
+    else:
+        logging.debug('no documents to delete')
     
-async def augment_meili_docs(module):
+async def augment_documents(module):
     try:
         logging.info(f"init {module.NAME}")
         await module.init()
@@ -620,11 +500,11 @@ async def augment_meili_docs(module):
         
         dirs_with_mtime = []
         logging.info(f"determining {module.NAME} processing order")
-        for metadata_dir_path in Path(METADATA_DATABASE_DIRECTORY).iterdir():
+        for metadata_dir_path in Path(METADATA_DIRECTORY).iterdir():
             if metadata_dir_path.is_dir() and (metadata_dir_path / "document.json").exists():
                 with open(metadata_dir_path / "document.json", 'r') as file:
                     document = json.load(file)
-                    file_path = get_file_path_from_meili_doc(document)
+                    file_path = path_from_meili_doc(document)
                 mtime = os.stat(file_path).st_mtime
                 dirs_with_mtime.append((metadata_dir_path, document, mtime))
 
@@ -632,7 +512,7 @@ async def augment_meili_docs(module):
 
         logging.info(f"start {module.NAME}")
         for metadata_dir_path, document, _ in dirs_with_mtime:
-            file_path = get_file_path_from_meili_doc(document)
+            file_path = path_from_meili_doc(document)
             task = asyncio.create_task(sem_task(file_path, metadata_dir_path, document))
             tasks_dict[file_path] = task
             tasks_list.append(task)
@@ -687,7 +567,7 @@ async def augment_meili_docs(module):
 
 async def augment_meili_doc_from_file_path(file_path, metadata_dir_path, document, module):
     path = Path(file_path)
-    relative_path = path.relative_to(OS_DIRECTORY_TO_INDEX).as_posix()
+    relative_path = path.relative_to(INDEX_DIRECTORY).as_posix()
     logging.debug(f'{module.NAME} started "{relative_path}"')
     
     if not path.exists():
@@ -705,8 +585,8 @@ async def augment_meili_doc_from_file_path(file_path, metadata_dir_path, documen
             logging.debug(f'{module.NAME} did not find "{relative_path}"')
             return "not found"
         logging.debug(f'{module.NAME} updating "{relative_path}" to {document}')
-        write_document_json_for_file_path(file_path, document)
-        await add_or_update_doc_meili(document)
+        write_document_json(document['id'], document)
+        await add_or_update_document(document)
         logging.debug(f'{module.NAME} updated "{relative_path}"')
     
     if updated:
@@ -715,6 +595,70 @@ async def augment_meili_doc_from_file_path(file_path, metadata_dir_path, documen
         logging.debug(f'{module.NAME} unchanged "{relative_path}"')
         
     return "success" if updated else "up-to-date"
+
+async def sync_documents():
+    logging.debug('starting document synchronization')
+
+    # Get existing documents from meili
+    existing_documents = await get_all_documents()
+    existing_docs_by_id = {doc['id']: doc for doc in existing_documents}
+    existing_doc_ids = set(existing_docs_by_id.keys())
+
+    current_doc_ids = set()
+    documents_to_delete_ids = set()
+    documents_to_add_or_update = []
+    restored_doc_ids = set()
+
+    # Scan files in the index directory
+    all_file_infos = []
+    for root, dirs, files in os.walk(INDEX_DIRECTORY):
+        dirs[:] = [d for d in dirs if os.path.join(root, d) != METADATA_DIRECTORY]
+        for filename in files:
+            file_path = os.path.join(root, filename)
+            file_info = gather_file_info(file_path)
+            if file_info:
+                all_file_infos.append(file_info)
+
+    # Group files by hash (id)
+    file_infos_by_hash = defaultdict(list)
+    for file_info in all_file_infos:
+        file_infos_by_hash[file_info['id']].append(file_info)
+
+    logging.debug('processing files grouped by hash')
+
+    for hash, file_infos in file_infos_by_hash.items():
+        current_doc_ids.add(hash)
+        document = get_document_for_hash(hash, file_infos)
+        if document:
+            documents_to_add_or_update.append(document)
+            logging.debug(f'queued document with id "{hash}" for add/update')
+
+    # Determine documents to delete
+    documents_to_delete_ids = existing_doc_ids - current_doc_ids
+    logging.debug(f'documents to delete: "{documents_to_delete_ids}"')
+
+    # Process metadata directory to restore documents
+    restored_doc_ids.update(process_metadata_directory(
+        current_doc_ids, existing_docs_by_id, documents_to_add_or_update, documents_to_delete_ids))
+
+    # Filter documents to delete
+    documents_to_delete_filtered = filter_documents_to_delete(documents_to_delete_ids, existing_docs_by_id)
+    logging.debug(f'documents to delete after filtering: "{documents_to_delete_filtered}"')
+
+    # Perform deletion and addition/update
+    await delete_documents(documents_to_delete_filtered)
+    await add_or_update_documents(documents_to_add_or_update)
+    await wait_for_meili_idle()
+
+    total_documents = await get_document_count()
+    if len(restored_doc_ids) > 0:
+        logging.info(f'restored {len(restored_doc_ids)} documents from "{METADATA_DIRECTORY}"')
+    if len(documents_to_add_or_update) > 0:
+        logging.info(f'added or updated {len(documents_to_add_or_update)} documents')
+    if len(documents_to_delete_filtered) > 0:
+        logging.info(f'deleted {len(documents_to_delete_filtered)} documents')
+        
+    logging.info(f'total documents {total_documents}')
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
@@ -722,14 +666,13 @@ class EventHandler(FileSystemEventHandler):
         self.index = self.meili_client.index(MEILISEARCH_INDEX_NAME)
 
     def should_ignore(self, path):
-        # Check if the event path starts with the ignored directory path
-        return os.path.commonpath([path, METADATA_DATABASE_DIRECTORY]) == METADATA_DATABASE_DIRECTORY
+        return os.path.commonpath([path, METADATA_DIRECTORY]) == METADATA_DIRECTORY
 
     def on_created(self, event):
         if not event.is_directory and not self.should_ignore(event.src_path):
             try:
                 logging.info(f'create "{event.src_path}"')
-                self.copy_or_create_meili(event.src_path)
+                self.add_or_update_document(event.src_path)
             except Exception:
                 logging.exception(f'create failed "{event.src_path}"')
 
@@ -737,8 +680,7 @@ class EventHandler(FileSystemEventHandler):
         if not event.is_directory and not self.should_ignore(event.src_path):
             try:
                 logging.info(f'modify "{event.src_path}"')
-                self.delete_meili(event.src_path)
-                self.update_meili(event.src_path)
+                self.add_or_update_document(event.src_path)
             except Exception:
                 logging.exception(f'modify failed "{event.src_path}"')
 
@@ -746,7 +688,7 @@ class EventHandler(FileSystemEventHandler):
         if not event.is_directory and not self.should_ignore(event.src_path):
             try:
                 logging.info(f'delete "{event.src_path}"')
-                self.delete_meili(event.src_path)
+                self.delete_document(event.src_path)
             except Exception:
                 logging.exception(f'delete failed "{event.src_path}"')
 
@@ -754,31 +696,38 @@ class EventHandler(FileSystemEventHandler):
         if not event.is_directory and not (self.should_ignore(event.src_path) or self.should_ignore(event.dest_path)):
             try:
                 logging.info(f'move "{event.src_path}" -> "{event.dest_path}"')
-                self.update_meili(event.dest_path)
+                self.delete_document(event.src_path)
+                self.add_or_update_document(event.dest_path)
             except Exception:
                 logging.exception(f'move failed "{event.src_path}" -> "{event.dest_path}"')
 
-    def copy_or_create_meili(self, file_path):
+    def add_or_update_document(self, file_path):
         file_info = gather_file_info(file_path)
-        if 'id' in file_info:
-            assign_new_id(file_info)
-            del file_info['document']
-        self.index.update_document(process_single_file(file_info))
+        if file_info:
+            document = get_document_for_hash(file_info["id"], [file_info])
+            if document:
+                self.index.update_document(document)
+                logging.debug(f'added or updated document with id "{document["id"]}" in meilisearch')
+            else:
+                logging.debug(f'no document generated for file "{file_path}"')
+        else:
+            logging.debug(f'failed to gather file info for "{file_path}"')
 
-    def update_meili(self, file_path):
-        file_info = gather_file_info(file_path)
-        if not 'id' in file_info:
-            assign_new_id(file_info)
-        self.index.update_document(process_single_file(file_info))
-
-    def delete_meili(self, file_path):
-        relative_path = get_relative_path_from_file_path(file_path)
+    def delete_document(self, file_path):
+        relative_path = os.path.relpath(file_path, INDEX_DIRECTORY)
         if relative_path.startswith(ARCHIVE_DIRECTORY):
             return
-        file_info = gather_file_info(file_path)
-        if 'id' in file_info:
-            shutil.rmtree(os.path.join(METADATA_DATABASE_DIRECTORY, file_info['id']))
-            self.index.delete_document(file_info['id'])
+        hash = compute_file_hash(file_path)
+        if hash:
+            metadata_entry_path = os.path.join(METADATA_DIRECTORY, hash)
+            if os.path.exists(metadata_entry_path):
+                shutil.rmtree(metadata_entry_path)
+                logging.debug(f'deleted metadata for document "{hash}"')
+                self.index.delete_document(hash)
+                logging.debug(f'deleted document with id "{hash}" from meilisearch')
+                delete_from_cache(file_path)
+        else:
+            logging.debug(f'no cache entry for file "{file_path}", cannot delete document')
         
 def process_main():
     logger = logging.getLogger('watchdog-process')
@@ -789,31 +738,32 @@ def process_main():
         logging.info(f'watchdog init')
         observer = Observer()
         handler = EventHandler()
-        observer.schedule(handler, OS_DIRECTORY_TO_INDEX, recursive=True)
+        observer.schedule(handler, INDEX_DIRECTORY, recursive=True)
         observer.start()
         observer.join()
     except Exception:
         logging.exception(f'watchdog init failed')
     
-async def update_meili_docs():
-    await sync_meili_docs()
-    
+async def begin_indexing():
     process = Process(target=process_main)
     process.start()    
     logging.info(f'watchdog process started')
     
+    await sync_documents()
+    
     while True:
         start_time = time.time()
         for module in modules:
-            await augment_meili_docs(module)
+            await augment_documents(module)
         elapsed_time = time.time() - start_time
-        await wait_for_idle_meili()
+        await wait_for_meili_idle()
         if elapsed_time < 60:
             await asyncio.sleep(RECHECK_TIME_AFTER_COMPLETE)
            
 async def main():
+    init_hash_cache_sqlite3()
     await init_meili()
-    await update_meili_docs()
+    await begin_indexing()
 
 if __name__ == "__main__":
     asyncio.run(main())
