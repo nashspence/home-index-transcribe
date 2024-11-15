@@ -24,11 +24,13 @@ services:
     depends_on:
       - grafana-promtail
       - meilisearch
+      - tika
     dns:
       - 172.21.0.200
     environment:
       - DOMAIN=private.0819870.xyz
       - MEILISEARCH_HOST=http://meilisearch:7700
+      - TIKA_SERVER_ENDPOINT=http://tika:9998
       - TZ=America/Los_Angeles
     networks:
       safenet: null

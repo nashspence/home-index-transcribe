@@ -9,11 +9,15 @@ import logging
 import os
 import pymediainfo
 import re
-import subprocess
 import tempfile
+import tika
+tika.TikaClientOnly = True
 
 from functools import cmp_to_key
 from pathlib import Path
+from requests.exceptions import ReadTimeout
+from tika import parser as tika_rmeta, config as tika_config
+from urllib3.exceptions import MaxRetryError, NewConnectionError, ReadTimeoutError
 
 logger = None
 
@@ -81,12 +85,8 @@ IMAGE_MIME_TYPES = {
 TIKA_MIMES = None
 SUPPORTED_MIME_TYPES = None
 
-ARCHIVE_MIME_TYPES = {
-    'application/zip', 'application/x-tar', 'application/gzip',
-    'application/x-bzip2', 'application/x-7z-compressed', 'application/x-rar-compressed',
-    'application/vnd.rar', 'application/x-ace-compressed', 'application/x-apple-diskimage',
-    'application/x-xz', 'application/x-lzip', 'application/x-lzma'
-}
+EXIFTOOL_MIMES = AUDIO_MIME_TYPES | VIDEO_MIME_TYPES | IMAGE_MIME_TYPES
+FFPROBE_LIBMEDIA_MIMES = AUDIO_MIME_TYPES | VIDEO_MIME_TYPES
 
 XATTR_SUPPORTED = None
 
@@ -927,7 +927,7 @@ def extract_timestamp(data):
                     parsed_datetimes.append((dt, highest_precision, offset_seconds, is_offset_real, field_path)) 
                     logger.debug(f'parsed as "{dt.isoformat()}" with precision "{highest_precision}"')
             except Exception as e:
-                logger.exception(f"error parsing value '{value}' for key '{key}' with components: {parsed_components} : {e}")
+                logger.warning(f"malformed datetime string '{value}' at '{field_path}': {e}")
     timestamp_data = {}
     used_relaxed = False
     if not parsed_datetimes and filepath_relaxed_timestamp:
@@ -938,7 +938,7 @@ def extract_timestamp(data):
     if parsed_datetimes:
         sorted_parsed_datetimes = sorted(parsed_datetimes, key=cmp_to_key(compare_dt_tuples))
         best_dt, best_precision, best_offset, best_is_real, file_path = sorted_parsed_datetimes[0]
-        logger.debug(f'selected option "{file_path}" "{best_dt.isoformat()}" as earliest with highest precision "{best_precision}"')
+        logger.debug(f'creation_date found at "{file_path}" "{best_dt.isoformat()}" as earliest with highest precision "{best_precision}"')
         if best_precision < 6 and mtime:
             try:
                 timestamp = float(mtime)
@@ -1028,7 +1028,7 @@ TIMESTAMP = ({
 def parse_field(d, fieldname, converter):
     value, fieldpath = get_first(d, fieldname)
     if value:
-        logger.debug(f'"{fieldname}" found in metadata "{fieldpath}"="{value}"')
+        logger.debug(f'"{fieldname}" found at "{fieldpath}" = "{value}"')
         try:
             return {fieldname: converter(str(value).strip().lower())}
         except ValueError as e:
@@ -1040,7 +1040,7 @@ def parse_field(d, fieldname, converter):
 def parse_text_field(d, fieldname):
     value, fieldpath = get_first(d, fieldname)
     if value:
-        logger.debug(f'"{fieldname}" found in metadata "{fieldpath}"')
+        logger.debug(f'"{fieldname}" found at "{fieldpath}"')
         cleaned_text = re.sub(r'\s{2,}', ' ', re.sub(r'[^\w\s]+|\s{2,}', ' ', str(value))).strip().lower()
         return {'text': cleaned_text} if cleaned_text else None
     return None
@@ -1053,7 +1053,7 @@ def parse_embedded_image(d, start_field, length_field, output_field):
         try:
             start_val = int(str(start).strip())
             length_val = int(str(length).strip())
-            logger.debug(f'"{output_field}" found in metadata start "{start_field_path}"={start_val} length "{length_field_path}"={length_val}')
+            logger.debug(f'"{output_field}" found "{start_field_path}" = "{start_val}", length "{length_field_path}" = "{length_val}"')
             return {output_field: f"bytes={start_val}-{start_val + length_val}"}
         except ValueError as e:
             logger.error(f"Error parsing embedded image fields '{start_field}' or '{length_field}': {e}")
@@ -1069,7 +1069,7 @@ def calculate_multi_pic_ranges(d):
         multi_pic_0_start_str, fieldpath_start = get_first(d, 'multi_pic_0_start')
         multi_pic_0_length_str, fieldpath_length = get_first(d, 'multi_pic_0_length')
         if multi_pic_0_start_str and multi_pic_0_length_str:
-            logger.debug(f'multipic found in metadata with start "{fieldpath_start}"="{multi_pic_0_start_str}" and length "{fieldpath_length}"="{multi_pic_0_length_str}"')
+            logger.debug(f'multipic found "{fieldpath_start}" = "{multi_pic_0_start_str}", length "{fieldpath_length}" = "{multi_pic_0_length_str}"')
             multi_pic_0_start = int(str(multi_pic_0_start_str).strip())
             multi_pic_0_length = int(str(multi_pic_0_length_str).strip())
             multi_pic_0_end = multi_pic_0_start + multi_pic_0_length
@@ -1080,7 +1080,7 @@ def calculate_multi_pic_ranges(d):
                 match = re.search(byte_length_regex, additional_length_data)
                 if match:
                     additional_length = int(match.group(1))
-                    logger.debug(f'additional multipic found metadata "{fieldpath}" with start "{current_start}" and length "{additional_length}"')
+                    logger.debug(f'multipic found "{fieldpath}" start = "{current_start}", length = "{additional_length}"')
                     current_end = current_start + additional_length
                     image_byte_ranges.append(f"bytes={current_start}-{current_end}")
                     current_start = current_end
@@ -1449,53 +1449,19 @@ def scrape_with_os(file_path):
     except Exception as e:
         logger.warning(f'scrape file bytes os stat failed "{file_path}": {e}')
         return None
-    
-def get_tika_mime_types():
-    try:
-        mime_types_command = ["java", "-jar", "/tika-app.jar", "--list-supported-types"]
-        mime_types_result = subprocess.run(mime_types_command, capture_output=True, text=True, timeout=None)
-        if mime_types_result.returncode == 0:
-            mime_types = set()
-            for line in mime_types_result.stdout.splitlines():
-                line = line.strip()
-                if line and not line.startswith("alias:") and not line.startswith("extension:"):
-                    mime_types.add(line)
-            return mime_types
-    except Exception as e:
-        logger.warning(f"Failed to get tika mime types: {e}")
 
 def scrape_with_tika(file_path):
     try:
-        metadata_command = ["java", "-jar", "/tika-app.jar", "-j", file_path]
-        metadata_result = subprocess.run(metadata_command, capture_output=True, text=True, timeout=None)
-        if metadata_result.returncode == 0:
-            result = json.loads(metadata_result.stdout)
-        else:
-            logger.warning(f'scrape file bytes tika failed "{file_path}": {metadata_result.stderr}')
-            return None
-        try:
-            text_command = ["java", "-jar", "/tika-app.jar", "-t", file_path]
-            text_result = subprocess.run(text_command, capture_output=True, text=True, timeout=None)
-            if text_result.returncode == 0:
-                text_result_content = text_result.stdout.strip()
-                if text_result_content:
-                    result["X-TIKA:content"] = text_result_content
-                else:
-                    return result
-        except Exception:
-            return result
-        try:
-            html_command = [ "java", "-jar", "/tika-app.jar", "-h", file_path]
-            html_result = subprocess.run(html_command, capture_output=True, text=True, timeout=None)
-            if html_result.returncode == 0:
-                html_content = html_result.stdout.strip()
-                if html_content:
-                    result["X-TIKA:html_content"] = html_content
-        except Exception:
-            pass
-        return result
+        parsed = tika_rmeta.from_file(file_path, requestOptions={'timeout': 120})
+        metadata = parsed["metadata"]
+        if parsed["content"]:
+            metadata['X-TIKA:content'] = parsed["content"]
+        return metadata
+    except (ReadTimeout, TimeoutError, ReadTimeoutError, MaxRetryError, NewConnectionError) as e:
+        raise e
     except Exception as e:
-        logger.warning(f'scrape file bytes tika failed "{file_path}": {e}')
+        logger.warning(f"Exception type: {type(e).__name__}, details: {e}")
+        logger.warning(f"scrape file bytes tika failed '{file_path}': {e}")
         return None
     
 def scrape_file_path(file_path):
@@ -1544,92 +1510,111 @@ def debug(metadata, file_path, result, key_regex=default_key_regex, file_path_re
     array_fix_pattern = r"\.(\d+)\.(?!$)|\.(\d+)$"
     key_pattern = re.compile(key_regex) if key_regex else None
     file_path_pattern = re.compile(file_path_regex) if file_path_regex else None
-    logger.info(f'scrape file bytes DEBUG "{file_path}"')
+    logger.debug(f'scrape file bytes DEBUG "{file_path}"')
     if file_path_pattern is None or file_path_pattern.search(file_path):
         for k, v in flat_metadata.items():
             if key_pattern is None or key_pattern.search(k):
                 fixed_key = re.sub(array_fix_pattern, lambda match: f"[{match.group(1)}]." if match.group(1) else f"[{match.group(2)}]", k)
-                logger.info(f'"{fixed_key}" : "{v}"')
-        logger.info(f'scrape file bytes DEBUG selected ------------------------')
+                logger.debug(f'"{fixed_key}" : "{v}"')
+        logger.debug(f'scrape file bytes DEBUG selected ------------------------')
         for k, v in result.items():
-            logger.info(f'"{k}" : "{v}"')
-        logger.info(f'scrape file bytes DEBUG end ------------------------')
-
+            logger.debug(f'"{k}" : "{v}"')
+        logger.debug(f'scrape file bytes DEBUG end ------------------------')
+        
 async def init():
-    global SUPPORTED_MIME_TYPES, TIKA_MIMES       
-    TIKA_MIMES = get_tika_mime_types()
+    global SUPPORTED_MIME_TYPES, TIKA_MIMES      
+    TIKA_MIMES = set(json.loads(tika_config.getMimeTypes())) - (VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES)
     SUPPORTED_MIME_TYPES = (TIKA_MIMES | VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES)
 
 async def cleanup():
     return
+
+async def process_files(file_list, cancel_event):
+    semaphore = asyncio.Semaphore(16)
+    async def process_file(fp, doc, spath, mtime):
+        async with semaphore:
+            try:
+                if cancel_event.is_set():
+                    return
+                return await get_document(fp, doc, spath, mtime, cancel_event)
+            except Exception as e:
+                logger.exception(f'failed to scrape file bytes {fp} due to {e}')
+    tasks = [asyncio.create_task(process_file(fp, doc, spath, mtime)) for fp, doc, spath, mtime in file_list]
+    for task in asyncio.as_completed(tasks):
+        if cancel_event.is_set():
+            break
+        document = await task
+        yield document
     
-async def get_fields(file_path, module_save_path, document):
+async def get_document(file_path, document, module_save_path, mtime, cancel_event):
     global logger
-    if logger is None:
-        logger = logging.getLogger("scrape_file_bytes")
-        logger.setLevel(logging.DEBUG)
-        log_file_path = module_save_path / "module.log"
-        file_handler = logging.FileHandler(log_file_path)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
-        logger.addHandler(file_handler)
     
-    logger.debug(f'starting get_fields for file: {file_path}')
+    doc_id = document['id']
     
-    mime = document["type"]
-    if mime not in SUPPORTED_MIME_TYPES:
-        logger.debug(f'unsupported mime type: {mime}, skipping')
-        return
-
-    version = None
-    added_fields = []
-
-    version_path = module_save_path / "version.json"
+    log_path = module_save_path / "file.log"
+    version_path = module_save_path / f"{NAME}.json"
     metadata_path = module_save_path / "metadata.json"
     index_path = module_save_path / "index.html"
+    txt_path = module_save_path / "plain_text.txt"
 
-    logger.debug(f'version path: {version_path}, metadata path: {metadata_path}, index path: {index_path}')
+    logger = logging.getLogger(f'{doc_id} {file_path}')
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    console_handler = logging.StreamHandler() 
+    console_handler.setLevel(logging.WARNING)
+    console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s')
+    console_handler.setFormatter(console_formatter)
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
     
-    if version_path.exists():
-        with open(version_path, 'r') as file:
-            version = json.load(file)
-        logger.debug(f'loaded version data: {version}')
-    
-    if version and version.get("file_path") == file_path and version.get("version") == VERSION:
-        logger.debug(f'file {file_path} is up-to-date, no scraping needed')
-        return
-
-    if version:
-        logger.debug(f'removing old fields and files for {file_path}')
-        if "added_fields" in version:
-            for field in version["added_fields"]:
-                document.pop(field, None)
-                logger.debug(f'removed field: {field}')
-        if metadata_path.exists():
-            os.remove(metadata_path)
-            logger.debug('deleted metadata.json')
-        if index_path.exists():
-            os.remove(index_path)
-            logger.debug('deleted index.html')
-
     try:
-        futures = {
-            "fs": asyncio.to_thread(scrape_with_os, file_path),
-            "filepath": asyncio.to_thread(scrape_file_path, file_path)
-        }
-        logger.debug('initialized async scraping tasks')
+        mime = document["type"]
+        if mime not in SUPPORTED_MIME_TYPES:
+            return
+
+        version = None
+        added_fields = []
         
-        if mime in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES | IMAGE_MIME_TYPES:
+        if version_path.exists():
+            with open(version_path, 'r') as file:
+                version = json.load(file)
+        
+        if version and version.get("file_path") == file_path and version.get("version") == VERSION:
+            return
+        
+        logger.debug(f'{NAME} start {file_path}')
+
+        if version:
+            logger.debug(f'removing old fields and files for {file_path}')
+            if "added_fields" in version:
+                for field in version["added_fields"]:
+                    document.pop(field, None)
+                    logger.debug(f'removed field: {field}')
+            if metadata_path.exists():
+                os.remove(metadata_path)
+                logger.debug('deleted metadata.json')
+            if index_path.exists():
+                os.remove(index_path)
+                logger.debug('deleted index.html')
+        
+        futures = {}
+        futures["fs"] = asyncio.to_thread(scrape_with_os, file_path)
+        futures["filepath"] = asyncio.to_thread(scrape_file_path, file_path)
+        if mime in EXIFTOOL_MIMES:
             futures["exiftool"] = asyncio.to_thread(scrape_with_exiftool, file_path)
             logger.debug('added exiftool scraping task')
-        if mime in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES:
+        if mime in FFPROBE_LIBMEDIA_MIMES:
             futures["ffprobe"] = asyncio.to_thread(scrape_with_ffprobe, file_path)
             futures["libmediainfo"] = asyncio.to_thread(scrape_with_libmediainfo, file_path)
             logger.debug('added ffprobe and libmediainfo scraping tasks')
         if mime in TIKA_MIMES:
             futures["tika"] = asyncio.to_thread(scrape_with_tika, file_path)
             logger.debug('added tika scraping task')
-
         results = await asyncio.gather(*futures.values())
+        
         metadata = {key: result for key, result in zip(futures.keys(), results)}
         logger.debug(f'scraping results collected: {metadata.keys()}')
 
@@ -1643,7 +1628,7 @@ async def get_fields(file_path, module_save_path, document):
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
         
         #debug(metadata, file_path, desired_fields, key_regex=None)
-        logger.debug(f'extracted desired fields "{desired_fields}"')
+        logger.debug(f'added fields to document "{desired_fields}"')
 
         for key, value in (desired_fields or {}).items():
             document[key] = value
@@ -1655,19 +1640,26 @@ async def get_fields(file_path, module_save_path, document):
                 "file_path": file_path,
                 "added_fields": added_fields
             }, file, indent=4, separators=(", ", ": "))
-        logger.debug(f'updated version.json with added fields: {added_fields}')
+        logger.debug(f'updated version.json at {version_path} with added fields: {added_fields}')
 
         with open(metadata_path, 'w') as file:
             json.dump(metadata, file, indent=4, separators=(", ", ": "))
         logger.debug('wrote metadata to metadata.json')
         
-        if "tika" in metadata and "X-TIKA:html_content" in metadata["tika"]:
+        if "tika" in metadata and metadata["tika"] is not None and "X-TIKA:content" in metadata["tika"]:
+            with open(txt_path, 'w') as file:
+                file.write(metadata["tika"]["X-TIKA:content"])
+            logger.debug('wrote plain text to plain_text.txt')
+        
+        if "tika" in metadata and metadata["tika"] is not None and "X-TIKA:html_content" in metadata["tika"]:
             with open(index_path, 'w') as file:
                 file.write(metadata["tika"]["X-TIKA:html_content"])
             logger.debug('wrote html content to index.html')
 
-        yield document
+        logger.info(f'{NAME} done')
+        return document
+    finally:
+        logger.removeHandler(console_handler)
+        logger.removeHandler(file_handler)
+        file_handler.close()
 
-    except Exception as e:
-        logger.exception(f'failed to scrape file bytes {file_path} due to {e}')
-        raise
