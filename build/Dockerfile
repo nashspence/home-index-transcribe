@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     libmagic1 \
     libmediainfo0v5 \
+    mediainfo \
     poppler-utils \
     tzdata \
     shared-mime-info \
@@ -21,16 +22,13 @@ WORKDIR /app
 
 RUN pip install \
     Pillow \
-    aiohttp \
     ffmpeg-python \
-    flatdict \
     git+https://github.com/m-bain/whisperx.git \
     jmespath \
     meilisearch_python_sdk \
     numpy \
     pdf2image \
     pyexiftool \
-    pymediainfo \
     python-magic \
     tika \
     wand \

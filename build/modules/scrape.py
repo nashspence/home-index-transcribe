@@ -2,26 +2,28 @@ import asyncio
 import datetime
 import exiftool
 import ffmpeg
-import flatdict
 import jmespath
 import json
 import logging
 import os
-import pymediainfo
 import re
+import subprocess
 import tempfile
 import tika
+import time
 tika.TikaClientOnly = True
 
+from concurrent.futures import ProcessPoolExecutor
 from functools import cmp_to_key
 from pathlib import Path
-from requests.exceptions import ReadTimeout
-from tika import parser as tika_rmeta, config as tika_config
-from urllib3.exceptions import MaxRetryError, NewConnectionError, ReadTimeoutError
+from multiprocessing import cpu_count
+from requests.exceptions import RequestException, ReadTimeout
+from tika import parser, config
+from urllib3.exceptions import HTTPError
 
-logger = None
+logger = logging
 
-NAME = "scrape_file_bytes"
+NAME = "scrape"
 VERSION = 1
 FILTERABLE_FIELD_NAMES = [
     'altitude',
@@ -82,8 +84,14 @@ IMAGE_MIME_TYPES = {
     "image/x-sraw"
 }
 
+ARCHIVE_MIME_TYPES = {
+    'application/zip', 'application/x-tar', 'application/gzip',
+    'application/x-bzip2', 'application/x-7z-compressed', 'application/x-rar-compressed',
+    'application/vnd.rar', 'application/x-ace-compressed', 'application/x-apple-diskimage',
+    'application/x-xz', 'application/x-lzip', 'application/x-lzma'
+}
+
 TIKA_MIMES = None
-SUPPORTED_MIME_TYPES = None
 
 EXIFTOOL_MIMES = AUDIO_MIME_TYPES | VIDEO_MIME_TYPES | IMAGE_MIME_TYPES
 FFPROBE_LIBMEDIA_MIMES = AUDIO_MIME_TYPES | VIDEO_MIME_TYPES
@@ -240,8 +248,8 @@ LOCATION = ({
         'ffprobe.format.tags.location',
         'ffprobe.format.tags."location-eng"',
         'ffprobe.format.tags.com.apple.quicktime.location.ISO6709',
-        'libmediainfo.tracks.General[0].comapplequicktimelocationiso6709',
-        'libmediainfo.tracks.General[0].xyz'
+        'libmediainfo.media.track.General[0].comapplequicktimelocationiso6709',
+        'libmediainfo.media.track.General[0].xyz'
     ],
     'gps_coordinates': [
         'exiftool."QuickTime:GPSCoordinates"'
@@ -1032,7 +1040,7 @@ def parse_field(d, fieldname, converter):
         try:
             return {fieldname: converter(str(value).strip().lower())}
         except ValueError as e:
-            logger.error(f"Error converting field '{fieldname}': {e}")
+            logger.debug(f'Error converting "{fieldname}" found at "{fieldpath}" = "{value}": {e}')
             return None
     return None
 
@@ -1092,15 +1100,15 @@ def calculate_multi_pic_ranges(d):
 AUDIO_BIT_RATE = ({
     'audio_bit_rate': [
         'ffprobe.format.bit_rate',
-        'libmediainfo.tracks.General[0].overall_bit_rate',
-        'libmediainfo.tracks.Audio[0].bit_rate',
+        'libmediainfo.media.track.General[0].OverallBitRate',
+        'libmediainfo.media.track.Audio[0].BitRate',
         'ffprobe.streams.audio[0].bit_rate'
     ]
 }, lambda d: parse_field(d, 'audio_bit_rate', int))
 
 VIDEO_AUDIO_BIT_RATE = ({
     'video_bit_rate': [
-        'libmediainfo.tracks.Audio[0].bit_rate',
+        'libmediainfo.media.track.Audio[0].BitRate',
         'ffprobe.streams.audio[0].bit_rate'
     ]
 }, lambda d: parse_field(d, 'video_bit_rate', int))
@@ -1108,7 +1116,7 @@ VIDEO_AUDIO_BIT_RATE = ({
 AUDIO_CHANNELS = ({
     'audio_channels': [
         'ffprobe.streams.audio[0].channels',
-        'libmediainfo.tracks.Audio[0].channel_s',
+        'libmediainfo.media.track.Audio[0].Channels',
         'exiftool."XML:AudioFormatNumOfChannel"',
         'exiftool."QuickTime:AudioChannels"'
     ]
@@ -1125,14 +1133,14 @@ AUDIO_DURATION = ({
 AUDIO_CODEC = ({
     'audio_codec': [
         'ffprobe.streams.audio[0].codec_name',
-        'libmediainfo.tracks.Audio[0].format',
+        'libmediainfo.media.track.Audio[0].Format',
         'exiftool."QuickTime:AudioFormat"'
     ]
 }, lambda d: parse_field(d, 'audio_codec', str))
 
 AUDIO_SAMPLE_RATE = ({
     'audio_sample_rate': [
-        'libmediainfo.tracks.Audio[0].sampling_rate',
+        'libmediainfo.media.track.Audio[0].SamplingRate',
         'ffprobe.streams.audio[0].sample_rate',
         'exiftool."QuickTime:AudioSampleRate"'
     ]
@@ -1146,7 +1154,7 @@ DEVICE_MAKE = ({
         'exiftool."QuickTime:AndroidManufacturer"',
         'ffprobe.format.tags.device_make',
         'ffprobe.format.tags.com.android.manufacturer',
-        'libmediainfo.tracks.General[0].comandroidmanufacturer',
+        'libmediainfo.media.track.General[0].comandroidmanufacturer',
         'exiftool."ICC_Profile:DeviceManufacturer"'
     ]
 }, lambda d: parse_field(d, 'device_make', str))
@@ -1159,7 +1167,7 @@ DEVICE_MODEL = ({
         'exiftool."QuickTime:AndroidModel"',
         'ffprobe.format.tags.device_model',
         'ffprobe.format.tags.com.android.model',
-        'libmediainfo.tracks.General[0].comandroidmodel',
+        'libmediainfo.media.track.General[0].comandroidmodel',
         'exiftool."ICC_Profile:DeviceModel"'
     ]
 }, lambda d: parse_field(d, 'device_model', str))
@@ -1262,7 +1270,7 @@ WIDTH = ({
 
 VIDEO_BIT_RATE = ({
     'video_bit_rate': [
-        'libmediainfo.tracks.Video[0].bit_rate',
+        'libmediainfo.media.track.Video[0].BitRate',
         'ffprobe.streams.video[0].bit_rate'
     ]
 }, lambda d: parse_field(d, 'video_bit_rate', int))
@@ -1273,13 +1281,24 @@ VIDEO_CODEC = ({
     ]
 }, lambda d: parse_field(d, 'video_codec', str))
 
+def parse_fraction_or_decimal(fraction_str):
+    match = re.match(r"^(\d+)/(\d+)$", fraction_str.strip())
+    if match:
+        numerator = int(match.group(1))
+        denominator = int(match.group(2))
+        return numerator / denominator
+    try:
+        return float(fraction_str)
+    except ValueError:
+        raise ValueError(f"Invalid fraction or decimal format: {fraction_str}")
+
 VIDEO_FRAME_RATE = ({
     'video_frame_rate': [
-        'libmediainfo.tracks.General[0].frame_rate',
-        'libmediainfo.tracks.Video[0].frame_rate',
-        'ffprobe.streams.video[0].r_frame_rate'
+        'ffprobe.streams.video[0].r_frame_rate',
+        'libmediainfo.media.track.General[0].FrameRate',
+        'libmediainfo.media.track.Video[0].FrameRate'
     ]
-}, lambda d: parse_field(d, 'video_frame_rate', float))
+}, lambda d: parse_field(d, 'video_frame_rate', parse_fraction_or_decimal))
 
 TEXT = ({
     'text': [
@@ -1383,7 +1402,7 @@ def scrape_with_exiftool(file_path):
         with exiftool.ExifToolHelper() as et:
             return et.get_metadata(file_path)[0]
     except Exception as e:
-        logger.warning(f'scrape file bytes exiftool failed "{file_path}" {e}')
+        logger.warning(f'{NAME} exiftool failed "{file_path}" {e}')
         return None
 
 def scrape_with_ffprobe(file_path):
@@ -1398,22 +1417,34 @@ def scrape_with_ffprobe(file_path):
         metadata['streams'] = streams_by_type
         return metadata
     except Exception as e:
-        logger.warning(f'scrape file bytes ffprobe failed "{file_path}" {e} stderr_output="{e.stderr}"')
+        stderr_output = e.stderr.decode('utf-8') if e.stderr else ""
+        error_message = stderr_output.strip().split('\n')[-1] if stderr_output else "Unknown ffprobe error"
+        logger.warning(f'{NAME} ffprobe failed: "{error_message}"')
         return None
     
 def scrape_with_libmediainfo(file_path):
     try:
-        media_info = pymediainfo.MediaInfo.parse(file_path)
-        return {'tracks': {
-            'General': [track.to_data() for track in media_info.general_tracks],
-            'Video': [track.to_data() for track in media_info.video_tracks],
-            'Audio': [track.to_data() for track in media_info.audio_tracks],
-            'Image': [track.to_data() for track in media_info.image_tracks],
-            'Text': [track.to_data() for track in media_info.text_tracks],
-            'Menu': [track.to_data() for track in media_info.menu_tracks]
-        }}
+        logger.info(f"start mediainfo subprocess for {file_path}")
+        result = subprocess.run(
+            ['mediainfo', '--Output=JSON', file_path],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10
+        )
+        metadata = json.loads(result.stdout)
+        media = metadata.get('media', {})
+        tracks_by_type = {}
+        for track in media.get('track', []):
+            track_type = track.get('@type', 'unknown')
+            if track_type not in tracks_by_type:
+                tracks_by_type[track_type] = []
+            tracks_by_type[track_type].append(track)
+        media['track'] = tracks_by_type
+        metadata['media'] = media
+        return metadata
     except Exception as e:
-        logger.warning(f'scrape file bytes libmediainfo failed "{file_path}": {e}')
+        logger.warning(f'{NAME} libmediainfo failed "{file_path}": {e}')
         return None
     
 def scrape_with_os(file_path):
@@ -1447,21 +1478,28 @@ def scrape_with_os(file_path):
                     
         return scrape
     except Exception as e:
-        logger.warning(f'scrape file bytes os stat failed "{file_path}": {e}')
+        logger.warning(f'{NAME} os stat failed "{file_path}": {e}')
         return None
 
+tika = None
+tika_parser = None
 def scrape_with_tika(file_path):
     try:
-        parsed = tika_rmeta.from_file(file_path, requestOptions={'timeout': 120})
+        parsed = tika_parser.from_file(file_path, requestOptions={'timeout': 60})
         metadata = parsed["metadata"]
         if parsed["content"]:
             metadata['X-TIKA:content'] = parsed["content"]
         return metadata
-    except (ReadTimeout, TimeoutError, ReadTimeoutError, MaxRetryError, NewConnectionError) as e:
+    except ReadTimeout as e:
+        logger.warning(f"{NAME} {file_path} tika failed: request timed out")
+        return None
+    except (RequestException, HTTPError) as e:
         raise e
     except Exception as e:
-        logger.warning(f"Exception type: {type(e).__name__}, details: {e}")
-        logger.warning(f"scrape file bytes tika failed '{file_path}': {e}")
+        cause = e
+        if e.__cause__:
+            cause = e.__cause__
+        logger.warning(f"{NAME} {file_path} tika failed {type(e).__name__}: {cause}")
         return None
     
 def scrape_file_path(file_path):
@@ -1482,8 +1520,7 @@ def scrape_file_path(file_path):
             }
             logger.debug(f'parsed rigid datetime set as "{result["creation_date_rigid"]}"')
     except Exception as e:
-        logger.warning(f'scrape file bytes scrape file path rigid date time failed "{file_path}": {e}')
-        return None
+        logger.warning(f'{NAME} file path rigid date time failed: {e}')
     
     try:
         relaxed_datetime_components = scrape_datetime_from_filepath_relaxed(file_path)
@@ -1498,70 +1535,105 @@ def scrape_file_path(file_path):
             }
             logger.debug(f'parsed relaxed datetime set as "{result["creation_date_relaxed"]}"')
     except Exception as e:
-        logger.warning(f'scrape file bytes scrape file path relaxed date time failed "{file_path}": {e}')
-        return None
+        logger.warning(f'{NAME} file path relaxed date time failed: {e}')
 
     logger.debug(f'scraped metadata from file path "{result}"')
     return result
-
-default_key_regex = r"(?i)(offset|start|length|title|author|desc|bit|depth|rate|channels|codec|sample|frame|height|width|dimension|device|make(?!r)|model|manufactur|camera|lens|altitude|orient|rotat|gps|coordinates|latitude|longitude|location|date|(?<!quick)time|zone|offset|iso8601|iso6709|duration)"
-def debug(metadata, file_path, result, key_regex=default_key_regex, file_path_regex=None):
-    flat_metadata = dict(flatdict.FlatterDict(metadata, delimiter='.'))
-    array_fix_pattern = r"\.(\d+)\.(?!$)|\.(\d+)$"
-    key_pattern = re.compile(key_regex) if key_regex else None
-    file_path_pattern = re.compile(file_path_regex) if file_path_regex else None
-    logger.debug(f'scrape file bytes DEBUG "{file_path}"')
-    if file_path_pattern is None or file_path_pattern.search(file_path):
-        for k, v in flat_metadata.items():
-            if key_pattern is None or key_pattern.search(k):
-                fixed_key = re.sub(array_fix_pattern, lambda match: f"[{match.group(1)}]." if match.group(1) else f"[{match.group(2)}]", k)
-                logger.debug(f'"{fixed_key}" : "{v}"')
-        logger.debug(f'scrape file bytes DEBUG selected ------------------------')
-        for k, v in result.items():
-            logger.debug(f'"{k}" : "{v}"')
-        logger.debug(f'scrape file bytes DEBUG end ------------------------')
+        
+def is_processing_needed(file_path, document, doc_db_path):
+    version = None
+    version_path = doc_db_path / f"{NAME}.json"
+    metadata_path = doc_db_path / "metadata.json"
+    txt_path = doc_db_path / "text.txt"
+    if version_path.exists():
+        with open(version_path, 'r') as file:
+            version = json.load(file)  
+    if version and version.get("file_path") == file_path and version.get("version") == VERSION:
+        return False
+    if version:
+        if "added_fields" in version:
+            for field in version["added_fields"]:
+                document.pop(field, None)
+        if metadata_path.exists():
+            os.remove(metadata_path)
+        if txt_path.exists():
+            os.remove(txt_path)
+    return True
         
 async def init():
-    global SUPPORTED_MIME_TYPES, TIKA_MIMES      
-    TIKA_MIMES = set(json.loads(tika_config.getMimeTypes())) - (VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES)
-    SUPPORTED_MIME_TYPES = (TIKA_MIMES | VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES)
+    global TIKA_MIMES
+    for attempt in range(30):
+        try:
+            TIKA_MIMES = set(json.loads(config.getMimeTypes())) - (VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES | ARCHIVE_MIME_TYPES)
+            return
+        except:
+            time.sleep(1 * attempt)
 
 async def cleanup():
     return
 
-async def process_files(file_list, cancel_event):
-    semaphore = asyncio.Semaphore(16)
-    async def process_file(fp, doc, spath, mtime):
-        async with semaphore:
-            try:
-                if cancel_event.is_set():
-                    return
-                return await get_document(fp, doc, spath, mtime, cancel_event)
-            except Exception as e:
-                logger.exception(f'failed to scrape file bytes {fp} due to {e}')
-    tasks = [asyncio.create_task(process_file(fp, doc, spath, mtime)) for fp, doc, spath, mtime in file_list]
-    for task in asyncio.as_completed(tasks):
-        if cancel_event.is_set():
-            break
-        document = await task
-        yield document
-    
-async def get_document(file_path, document, module_save_path, mtime, cancel_event):
-    global logger
-    
-    doc_id = document['id']
-    
-    log_path = module_save_path / "file.log"
-    version_path = module_save_path / f"{NAME}.json"
-    metadata_path = module_save_path / "metadata.json"
-    index_path = module_save_path / "index.html"
-    txt_path = module_save_path / "plain_text.txt"
+def process_file(file):
+    try:
+        fp, doc, spath, mtime = file
+        result = get_document(fp, doc, spath, mtime)
+        return result, {"success": 1}
+    except Exception as e:
+        logging.error(f'{NAME} {fp} failed: {e.__cause__ if e.__cause__ else e}')
+        return None, {"failure": 1}
 
-    logger = logging.getLogger(f'{doc_id} {file_path}')
+async def process_files(file_list, cancel_event):    
+    executor = ProcessPoolExecutor(max_workers=cpu_count())
+    
+    try:
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(executor, process_file, file)
+            for file in file_list
+        ]
+        stats = {
+            "success": 0,
+            "failure": 0,
+            "cancelled": 0
+        }
+        is_cancelled = False
+        for future in asyncio.as_completed(tasks):
+            try:
+                result, stat = await future
+                for key in stats:
+                    stats[key] += stat.get(key, 0)
+                if result:
+                    yield result
+                if cancel_event.is_set() and not is_cancelled:
+                    logging.debug(f"{NAME} finishing already started files, cancelling the rest")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    is_cancelled = True
+            except asyncio.CancelledError:
+                stats["cancelled"] += 1
+            except Exception:
+                logging.exception("unhandled task exception")
+    finally:
+        executor.shutdown()
+        
+    logging.info("------------------------------------------")
+    logging.info(f"{NAME} shutdown summary:")
+    logging.info(f"  {stats['success']} succeeded")
+    logging.info(f"  {stats['failure']} failed")
+    logging.info(f"  {stats['cancelled']} postponed ")
+    logging.info("------------------------------------------")
+    
+def get_document(file_path, document, doc_db_path, mtime):
+    global logger   
+    
+    log_path = doc_db_path / "log.text"
+    version_path = doc_db_path / f"{NAME}.json"
+    metadata_path = doc_db_path / "metadata.json"
+    txt_path = doc_db_path / "text.txt"
+
+    logger = logging.getLogger(f'{document["id"]} {file_path}')
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     console_handler = logging.StreamHandler() 
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.ERROR)
     console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s')
     console_handler.setFormatter(console_formatter)
     file_handler = logging.FileHandler(log_path)
@@ -1571,63 +1643,42 @@ async def get_document(file_path, document, module_save_path, mtime, cancel_even
     logger.addHandler(file_handler)
     
     try:
-        mime = document["type"]
-        if mime not in SUPPORTED_MIME_TYPES:
-            return
-
-        version = None
+        logger.info(f'{NAME} start {file_path}')
         added_fields = []
         
-        if version_path.exists():
-            with open(version_path, 'r') as file:
-                version = json.load(file)
-        
-        if version and version.get("file_path") == file_path and version.get("version") == VERSION:
-            return
-        
-        logger.debug(f'{NAME} start {file_path}')
-
-        if version:
-            logger.debug(f'removing old fields and files for {file_path}')
-            if "added_fields" in version:
-                for field in version["added_fields"]:
-                    document.pop(field, None)
-                    logger.debug(f'removed field: {field}')
-            if metadata_path.exists():
-                os.remove(metadata_path)
-                logger.debug('deleted metadata.json')
-            if index_path.exists():
-                os.remove(index_path)
-                logger.debug('deleted index.html')
-        
-        futures = {}
-        futures["fs"] = asyncio.to_thread(scrape_with_os, file_path)
-        futures["filepath"] = asyncio.to_thread(scrape_file_path, file_path)
-        if mime in EXIFTOOL_MIMES:
-            futures["exiftool"] = asyncio.to_thread(scrape_with_exiftool, file_path)
+        metadata = {}
+        metadata["fs"] = scrape_with_os(file_path)
+        metadata["filepath"] = scrape_file_path(file_path)
+        if document["type"] in EXIFTOOL_MIMES:
+            logger.info(f"start exiftool")
+            metadata["exiftool"] = scrape_with_exiftool(file_path)
+            logger.info(f"end exiftool")
             logger.debug('added exiftool scraping task')
-        if mime in FFPROBE_LIBMEDIA_MIMES:
-            futures["ffprobe"] = asyncio.to_thread(scrape_with_ffprobe, file_path)
-            futures["libmediainfo"] = asyncio.to_thread(scrape_with_libmediainfo, file_path)
+        if document["type"] in FFPROBE_LIBMEDIA_MIMES:
+            logger.info(f"start ffprobe")
+            metadata["ffprobe"] = scrape_with_ffprobe(file_path)
+            logger.info(f"end ffprobe")
+            logger.info(f"start libmediainfo")
+            metadata["libmediainfo"] = scrape_with_libmediainfo(file_path)
+            logger.info(f"end libmediainfo")
             logger.debug('added ffprobe and libmediainfo scraping tasks')
-        if mime in TIKA_MIMES:
-            futures["tika"] = asyncio.to_thread(scrape_with_tika, file_path)
+        if document["type"] in TIKA_MIMES:
+            logger.info(f"start tika")
+            metadata["tika"] = scrape_with_tika(file_path)
+            logger.info(f"end tika")
             logger.debug('added tika scraping task')
-        results = await asyncio.gather(*futures.values())
         
-        metadata = {key: result for key, result in zip(futures.keys(), results)}
         logger.debug(f'scraping results collected: {metadata.keys()}')
 
-        if mime in VIDEO_MIME_TYPES:
+        if document["type"] in VIDEO_MIME_TYPES:
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_VIDEO)
-        elif mime in AUDIO_MIME_TYPES:
+        elif document["type"] in AUDIO_MIME_TYPES:
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_AUDIO)
-        elif mime in IMAGE_MIME_TYPES:
+        elif document["type"] in IMAGE_MIME_TYPES:
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_IMAGE)
         else:
             desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
         
-        #debug(metadata, file_path, desired_fields, key_regex=None)
         logger.debug(f'added fields to document "{desired_fields}"')
 
         for key, value in (desired_fields or {}).items():
@@ -1650,16 +1701,12 @@ async def get_document(file_path, document, module_save_path, mtime, cancel_even
             with open(txt_path, 'w') as file:
                 file.write(metadata["tika"]["X-TIKA:content"])
             logger.debug('wrote plain text to plain_text.txt')
-        
-        if "tika" in metadata and metadata["tika"] is not None and "X-TIKA:html_content" in metadata["tika"]:
-            with open(index_path, 'w') as file:
-                file.write(metadata["tika"]["X-TIKA:html_content"])
-            logger.debug('wrote html content to index.html')
 
         logger.info(f'{NAME} done')
         return document
     finally:
+        file_handler.close()
+        console_handler.close()
         logger.removeHandler(console_handler)
         logger.removeHandler(file_handler)
-        file_handler.close()
 

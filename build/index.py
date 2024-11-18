@@ -16,13 +16,12 @@ from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process, Pool, cpu_count
 from pathlib import Path
-from queue import Queue, Empty
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 VERSION = 1
 
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "86400"))
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
 ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "/data/archive")
 CACHE_FILE_PATH = os.environ.get("CACHE_FILE_PATH", "/data/metadata/cache")
 DOMAIN = os.environ.get("DOMAIN", "localhost")
@@ -31,16 +30,17 @@ MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://localhost:7700")
 MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
 METADATA_DIRECTORY = os.environ.get("METADATA_DIRECTORY", "/data/metadata")
-RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "3600"))
+RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "1800"))
 
 if not os.path.exists("./data/logs"):
     os.makedirs("./data/logs")
 if not os.path.exists(METADATA_DIRECTORY):
     os.makedirs(METADATA_DIRECTORY)
 
-import scrape_file_bytes
+import scrape
+import transcribe
 
-modules = [scrape_file_bytes]
+modules = [scrape, transcribe]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,19 +258,14 @@ def write_document_json(document_dict):
 
 def read_document_json(id):
     doc_path = os.path.join(METADATA_DIRECTORY, id, 'document.json')
-    try:
-        with open(doc_path, 'r') as file:
-            document = json.load(file)
-    except Exception as e:
-        logging.warning(e)
+    if not os.path.exists(doc_path):
         return None, False
+    with open(doc_path, 'r') as file:
+        document = json.load(file)
     version_path = os.path.join(METADATA_DIRECTORY, id, 'version.json')
-    try:
-        with open(version_path, 'r') as version_file:
-            version_data = json.load(version_file)
-            saved_version = version_data.get("version")
-    except Exception as e:
-        saved_version = None
+    with open(version_path, 'r') as version_file:
+        version_data = json.load(version_file)
+        saved_version = version_data.get("version")
     version_changed = saved_version != VERSION
     return document, version_changed
 
@@ -283,20 +278,8 @@ def relative_path_from_url(url):
 def url_from_relative_path(relative_path):
     return f"https://{DOMAIN}/{relative_path}"
 
-connection_pool = Queue(1)
-for _ in range(1):
-    conn = sqlite3.connect(CACHE_FILE_PATH, check_same_thread=False)
-    conn.execute('PRAGMA journal_mode=WAL')  # Enables WAL mode
-    connection_pool.put(conn)
-
-def get_connection():
-    try:
-        return connection_pool.get(timeout=10)
-    except Empty:
-        raise Exception("Connection pool exhausted")
-
-def return_connection(conn):
-    connection_pool.put(conn)
+conn = sqlite3.connect(CACHE_FILE_PATH)
+conn.execute('PRAGMA journal_mode=WAL')  # Enables WAL mode
 
 def execute_with_retry(cursor, query, params=(), retries=3, delay=0.1):
     for attempt in range(retries):
@@ -323,56 +306,39 @@ def commit_with_retry(conn, retries=3, delay=0.1):
     raise sqlite3.OperationalError("Database is locked after retries.")
 
 def init_hash_cache_sqlite3():
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        execute_with_retry(cursor, '''
-            CREATE TABLE IF NOT EXISTS hash_cache (
-                file_path TEXT PRIMARY KEY,
-                mtime INTEGER,
-                hash TEXT
-            )
-        ''')
-        commit_with_retry(conn)
-    finally:
-        return_connection(conn)
+    cursor = conn.cursor()
+    execute_with_retry(cursor, '''
+        CREATE TABLE IF NOT EXISTS hash_cache (
+            file_path TEXT PRIMARY KEY,
+            mtime INTEGER,
+            hash TEXT
+        )
+    ''')
+    commit_with_retry(conn)
 
 def upsert_into_cache(file_path, mtime, file_hash):
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        execute_with_retry(cursor, '''
-            INSERT INTO hash_cache (file_path, mtime, hash)
-            VALUES (?, ?, ?)
-            ON CONFLICT(file_path) DO UPDATE SET mtime=excluded.mtime, hash=excluded.hash
-        ''', (file_path, mtime, file_hash))
-        commit_with_retry(conn)
-    finally:
-        return_connection(conn)
+    cursor = conn.cursor()
+    execute_with_retry(cursor, '''
+        INSERT INTO hash_cache (file_path, mtime, hash)
+        VALUES (?, ?, ?)
+        ON CONFLICT(file_path) DO UPDATE SET mtime=excluded.mtime, hash=excluded.hash
+    ''', (file_path, mtime, file_hash))
+    commit_with_retry(conn)
 
 def get_from_cache(file_path):
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        execute_with_retry(cursor, 'SELECT mtime, hash FROM hash_cache WHERE file_path = ?', (file_path,))
-        result = cursor.fetchone()
-        if result:
-            mtime, file_hash = result
-            return {'mtime': mtime, 'hash': file_hash}
-        else:
-            return None
-    finally:
-        return_connection(conn)
+    cursor = conn.cursor()
+    execute_with_retry(cursor, 'SELECT mtime, hash FROM hash_cache WHERE file_path = ?', (file_path,))
+    result = cursor.fetchone()
+    if result:
+        mtime, file_hash = result
+        return {'mtime': mtime, 'hash': file_hash}
+    else:
+        return None
 
 def delete_from_cache(file_path):
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        execute_with_retry(cursor, 'DELETE FROM hash_cache WHERE file_path = ?', (file_path,))
-        commit_with_retry(conn)
-    finally:
-        return_connection(conn)
-    logging.debug(f'Deleted cache entry for file "{file_path}"')
+    cursor = conn.cursor()
+    execute_with_retry(cursor, 'DELETE FROM hash_cache WHERE file_path = ?', (file_path,))
+    commit_with_retry(conn)
 
 def compute_file_hash(file_path, mtime):
     cache_entry = get_from_cache(file_path)
@@ -539,7 +505,7 @@ async def delete_documents(doc_ids):
     else:
         logging.debug('no documents to delete')
         
-def get_file_list():
+def get_file_list(module):
     dirs_with_mtime = []
     for metadata_dir_path in Path(METADATA_DIRECTORY).iterdir():
         if metadata_dir_path.is_dir() and (metadata_dir_path / "document.json").exists():
@@ -547,48 +513,59 @@ def get_file_list():
                 document = json.load(file)
                 file_path = path_from_meili_doc(document)
             mtime = os.stat(file_path).st_mtime
-            dirs_with_mtime.append((file_path, document, metadata_dir_path, mtime))
+            try:
+                if module.is_processing_needed(file_path, document, metadata_dir_path):
+                    dirs_with_mtime.append((file_path, document, metadata_dir_path, mtime))
+            except Exception as e:
+                 logging.exception(f"{module.NAME} {file_path} failed to check is processing needed: {e}")
     dirs_with_mtime.sort(key=lambda x: x[3], reverse=True)
     return dirs_with_mtime
 
 async def augment_documents(module):
     try:
-        logging.info(f"Initializing {module.NAME}")
+        logging.debug(f"{module.NAME} init")
         await module.init()
+        logging.debug(f"{module.NAME} iterate db")
+        file_list = get_file_list(module)
     except Exception as e:
         logging.exception(f"{module.NAME} initialization failed: {e}")
         return
     try:
-        cancel_event = asyncio.Event()
-        async def document_update_handler():
-            async for document in module.process_files(get_file_list(), cancel_event):
-                if document is None:
-                    continue
-                try:
-                    await add_or_update_document(document)
-                    write_document_json(document)
-                except Exception as e:
-                    logging.exception(f'{module.NAME} updating meili for document "{document}" failed: {e} ')        
-        task = asyncio.create_task(document_update_handler())
-        try:
-            await asyncio.wait_for(task, timeout=ALLOWED_TIME_PER_MODULE)
-        except asyncio.TimeoutError:
-            logging.info(f"{module.NAME} timed out, cancelling...")
-            cancel_event.set()
-            await task
+        if file_list:
+            logging.info(f"{module.NAME} started for {len(file_list)} out-dated hashes")
+            cancel_event = asyncio.Event()
+            async def document_update_handler():
+                async for document in module.process_files(file_list, cancel_event):
+                    try:
+                        await add_or_update_document(document)
+                        write_document_json(document)
+                    except Exception as e:
+                        logging.exception(f'{module.NAME} updating meili for document "{document}" failed: {e} ')        
+            task = asyncio.create_task(document_update_handler())
+            try:
+                logging.debug(f"{module.NAME} go")
+                await asyncio.wait_for(asyncio.shield(task), timeout=ALLOWED_TIME_PER_MODULE)
+                logging.debug(f"{module.NAME} up-to-date")
+                return False
+            except asyncio.TimeoutError:
+                logging.debug(f"{module.NAME} ask cancel after in-progress files are complete")
+                cancel_event.set()
+                await task
     except Exception as e:
-        logging.exception(f"{module.NAME} processing failed: {e}")
+        logging.exception(f"{module.NAME} processing failed: {e}")   
     finally:
         try:
-            logging.info(f"Cleaning up {module.NAME}")
+            logging.debug(f"{module.NAME} clean")
             await module.cleanup()
+            logging.debug(f"{module.NAME} stop")
         except Exception as e:
             logging.exception(f"{module.NAME} cleanup failed: {e}")
+    return True
 
 async def sync_documents():
     logging.debug('get all documents from meili')
     existing_documents = await get_all_documents()
-    logging.info(f'meili returned "{len(existing_documents)}" total documents')
+    logging.info(f'meili has {len(existing_documents)} documents')
     existing_docs_by_id = {doc['id']: doc for doc in existing_documents}
     existing_doc_ids = set(existing_docs_by_id.keys())
 
@@ -597,7 +574,7 @@ async def sync_documents():
     documents_to_add_or_update = []
     restored_doc_ids = set()
 
-    logging.info(f'recusively scan all files in {DOMAIN}')
+    logging.info(f'scan files in {DOMAIN}')
     file_paths = []
     for root, dirs, files in os.walk(INDEX_DIRECTORY):
         dirs[:] = [d for d in dirs if os.path.join(root, d) != METADATA_DIRECTORY]
@@ -605,7 +582,7 @@ async def sync_documents():
             file_path = os.path.join(root, filename)
             file_paths.append(file_path)
             
-    logging.info(f'check file hashes, compute if necessary (could take a long time...)')    
+    logging.info(f'check file hashes')    
     with Pool(processes=cpu_count()) as pool:
         all_file_infos = [fi for fi in pool.map(gather_file_info, file_paths) if fi]
 
@@ -614,7 +591,7 @@ async def sync_documents():
     for file_info in all_file_infos:
         file_infos_by_hash[file_info['id']].append(file_info)
 
-    logging.info('creating/adjusting documents for files found')
+    logging.info('collect documents')
     semaphore = asyncio.Semaphore(48)
     async def process_document(hash, file_infos):
         async with semaphore:
@@ -628,7 +605,7 @@ async def sync_documents():
     # Determine documents to delete
     documents_to_delete_ids = existing_doc_ids - current_doc_ids
 
-    logging.info(f'checking "{METADATA_DIRECTORY}" against found file and index')
+    logging.info(f'checking metadata directory against found files and documents')
     restored_doc_ids.update(process_metadata_directory(
         current_doc_ids, existing_docs_by_id, documents_to_add_or_update, documents_to_delete_ids))
 
@@ -644,14 +621,14 @@ async def sync_documents():
         await wait_for_meili_idle()
 
     if len(restored_doc_ids) > 0:
-        logging.info(f'restored {len(restored_doc_ids)} documents from "{METADATA_DIRECTORY}"')
+        logging.info(f'restored {len(restored_doc_ids)} documents from "{METADATA_DIRECTORY}" to meili')
     if len(documents_to_add_or_update) > 0:
-        logging.info(f'added or updated {len(documents_to_add_or_update)} documents')
+        logging.info(f'added or updated {len(documents_to_add_or_update)} documents in meili')
     if len(documents_to_delete_filtered) > 0:
-        logging.info(f'deleted {len(documents_to_delete_filtered)} documents')
+        logging.info(f'deleted {len(documents_to_delete_filtered)} documents in meili')
         
     total_documents = await get_document_count()
-    logging.info(f'total documents {total_documents}')
+    logging.info(f'meili has {total_documents} up-to-date documents')
      
 class EventHandler(FileSystemEventHandler):
     def __init__(self):
@@ -742,13 +719,17 @@ async def begin_indexing():
     logging.info(f'watchdog process started')
     await sync_documents()
     
+    logging.info(f'run modules')
+    log_up_to_date = True
     while True:
-        start_time = time.time()
+        run_again = False
         for module in modules:
-            await augment_documents(module)
-        elapsed_time = time.time() - start_time
-        await wait_for_meili_idle()
-        if elapsed_time < 60:
+            run_again = (await augment_documents(module)) or run_again
+            log_up_to_date = run_again or log_up_to_date
+        if not run_again:
+            if log_up_to_date:
+                logging.debug(f'up-to-date, recheck on {RECHECK_TIME_AFTER_COMPLETE / 60} minute intervals')
+                log_up_to_date = False
             await asyncio.sleep(RECHECK_TIME_AFTER_COMPLETE)
            
 async def main():
