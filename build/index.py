@@ -19,16 +19,14 @@ from logging.handlers import TimedRotatingFileHandler
 from meilisearch_python_sdk import AsyncClient, Client
 from multiprocessing import Process, Pool, cpu_count
 from pathlib import Path
-from urllib.parse import quote
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 VERSION = 1
 
 ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
-ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "/data/archive")
+ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "archive")
 CACHE_FILE_PATH = os.environ.get("CACHE_FILE_PATH", "/data/metadata/cache")
-DOMAIN = os.environ.get("DOMAIN", "localhost")
 INDEX_DIRECTORY = os.environ.get("INDEX_DIRECTORY", "/data")
 MEILISEARCH_BATCH_SIZE = int(os.environ.get("MEILISEARCH_BATCH_SIZE", "10000"))
 MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://localhost:7700")
@@ -130,19 +128,25 @@ async def init_meili():
             raise
 
     filterable_attributes = [
-        "id",
-        "type",
+        "is_archived",
         "mtime",
+        "paths",
         "size",
-        "urls",
+        "status",
+        "type",
     ] + list(chain(*[module.FILTERABLE_FIELD_NAMES for module in modules]))
 
     try:
         logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
-        await index.update_sortable_attributes(
-            ["mtime", "size"]
-            + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules]))
+        await index.update_sortable_attributes([
+            "is_archived",
+            "mtime",
+            "paths",
+            "size",
+            "status",
+            "type",
+        ] + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules]))
         )
     except Exception:
         logging.exception(f"meili update index attrs failed")
@@ -320,22 +324,13 @@ def read_document_json(id):
 
 
 def path_from_meili_doc(doc):
-    return Path(
-        doc["urls"][0].replace(f"https://{DOMAIN}/", f"{INDEX_DIRECTORY}/")
-    ).as_posix()
-
-
-def relative_path_from_url(url):
-    return Path(url.replace(f"https://{DOMAIN}/", "")).as_posix()
-
-
-def url_from_relative_path(relative_path):
-    encoded_path = quote(relative_path)
-    return f"https://{DOMAIN}/{encoded_path}"
+    absolute_path = os.path.join(INDEX_DIRECTORY, doc["paths"][0])
+    absolute_path = os.path.normpath(absolute_path)
+    return absolute_path
 
 
 def metadata_dir_path_from_doc(doc):
-    Path(METADATA_DIRECTORY) / doc["id"]
+    return Path(METADATA_DIRECTORY) / doc["id"]
 
 
 conn = sqlite3.connect(CACHE_FILE_PATH)
@@ -466,7 +461,7 @@ def handle_document_changed(pdoc, cdoc):
     
     status = "idle"
     for module in modules:
-        if module.inspect(pdoc, cdoc, path_from_meili_doc(cdoc), metadata_dir_path_from_doc(cdoc)):
+        if module.handle_document_changed(pdoc, cdoc, path_from_meili_doc(cdoc), metadata_dir_path_from_doc(cdoc)):
             status = module.NAME
             break
     cdoc["status"] = status
@@ -477,17 +472,14 @@ def handle_document_changed(pdoc, cdoc):
 def get_document_for_hash(doc_id, file_infos):
     try:
         logging.debug(f'processing files with id "{doc_id}"')
-        urls = set()
         paths = set()
         mtimes = []
         for file_info in file_infos:
             relative_path = os.path.relpath(file_info["path"], INDEX_DIRECTORY)
             paths.add(relative_path)
-            url = url_from_relative_path(relative_path)
-            urls.add(url)
             mtimes.append(file_info["mtime"])
             logging.debug(
-                f'file "{file_info["path"]}" contributes url "{url}" and mtime "{file_info["mtime"]}"'
+                f'file "{file_info["path"]}" contributes path "{relative_path}" and mtime "{file_info["mtime"]}"'
             )
 
         max_mtime = max(mtimes)
@@ -503,17 +495,12 @@ def get_document_for_hash(doc_id, file_infos):
                 existing_document.get("mtime", 0) if existing_document else 0,
             ),
             "paths": (
-                list(urls.union(set(existing_document.get("paths", []))))
+                list(paths.union(set(existing_document.get("paths", []))))
                 if existing_document
                 else list(paths)
             ),
             "size": sample_file_info["stat"].st_size,
             "type": mime_type,
-            "urls": (
-                list(urls.union(set(existing_document.get("urls", []))))
-                if existing_document
-                else list(urls)
-            ),
         }
 
         # Check if the document has changed by comparing key fields
@@ -523,7 +510,6 @@ def get_document_for_hash(doc_id, file_infos):
             or document["size"] != existing_document.get("size")
             or document["type"] != existing_document.get("type")
             or set(document["paths"]) != set(existing_document.get("paths", []))
-            or set(document["urls"]) != set(existing_document.get("urls", []))
             or sample_file_info["is_version_updated"] == True
         )
 
@@ -531,7 +517,7 @@ def get_document_for_hash(doc_id, file_infos):
             document = handle_document_changed(existing_document, document)
 
         logging.debug(
-            f'processed document for id "{doc_id}" with urls "{document["urls"]}"'
+            f'processed document for id "{doc_id}" with paths "{document["paths"]}"'
         )
         return document, document_changed
     except Exception as e:
@@ -576,12 +562,11 @@ def process_metadata_directory(
 def restore_document_from_metadata(
     doc_id, document, documents_to_add_or_update, documents_to_delete_ids
 ):
-    urls = document.get("urls", [])
+    paths = document.get("paths", [])
     restored = False
-    logging.debug(f'restoring document "{doc_id}" from metadata with urls "{urls}"')
+    logging.debug(f'restoring document "{doc_id}" from metadata with paths "{paths}"')
 
-    for url in urls:
-        relative_path = relative_path_from_url(url)
+    for relative_path in paths:
         file_path = os.path.join(INDEX_DIRECTORY, relative_path)
         if os.path.exists(file_path):
             file_info = gather_file_info(file_path)
@@ -619,9 +604,8 @@ def filter_documents_to_delete(documents_to_delete_ids, existing_docs_by_id):
     for doc_id in documents_to_delete_ids:
         document = existing_docs_by_id.get(doc_id)
         if document:
-            urls = document.get("urls", [])
-            for url in urls:
-                relative_path = relative_path_from_url(url)
+            paths = document.get("paths", [])
+            for relative_path in paths:
                 if not relative_path.startswith(ARCHIVE_DIRECTORY):
                     filtered_ids.add(doc_id)
                     logging.debug(f'document "{doc_id}" marked for deletion')
@@ -646,29 +630,29 @@ async def delete_documents(doc_ids):
 def get_file_list(module):
     dirs_with_mtime = []
     for metadata_dir_path in Path(METADATA_DIRECTORY).iterdir():
-        if (
-            metadata_dir_path.is_dir()
-            and (metadata_dir_path / "document.json").exists()
-        ):
-            with open(metadata_dir_path / "document.json", "r") as file:
-                document = json.load(file)
-                file_path = path_from_meili_doc(document)
-            mtime = os.stat(file_path).st_mtime
-            if document['status'] == module.NAME:
-                dirs_with_mtime.append(
-                    (file_path, document, metadata_dir_path, mtime)
-                )
+        try:
+            if (
+                metadata_dir_path.is_dir()
+                and (metadata_dir_path / "document.json").exists()
+            ):
+                with open(metadata_dir_path / "document.json", "r") as file:
+                    document = json.load(file)
+                    file_path = path_from_meili_doc(document)
+                mtime = os.stat(file_path).st_mtime
+                if document['status'] == module.NAME:
+                    dirs_with_mtime.append(
+                        (file_path, document, metadata_dir_path, mtime)
+                    )
+        except Exception as e:
+            logging.warning(f"{module.NAME} {metadata_dir_path} failed: {e}")
+            return
     dirs_with_mtime.sort(key=lambda x: (0 if x[1]['is_archived'] else 1, -x[3]))
     return dirs_with_mtime
 
 
 async def augment_documents(module):
-    try:
-        logging.debug(f"{module.NAME} select files")
-        file_list = get_file_list(module)
-    except Exception as e:
-        logging.exception(f"{module.NAME} select files failed: {e}")
-        return
+    logging.debug(f"{module.NAME} select files")
+    file_list = get_file_list(module)
     try:
         if file_list:
             logging.info(f"{module.NAME} started for {len(file_list)} out-dated hashes")
@@ -716,7 +700,7 @@ async def sync_documents():
     documents_to_add_or_update = []
     restored_doc_ids = set()
 
-    logging.info(f"scan files in {DOMAIN}")
+    logging.info(f"scan files")
     file_paths = []
     for root, dirs, files in os.walk(INDEX_DIRECTORY):
         dirs[:] = [d for d in dirs if os.path.join(root, d) != METADATA_DIRECTORY]

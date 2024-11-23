@@ -9,6 +9,7 @@ VERSION = 1
 PATH = "/app/modules/scrape.py"
 MAX_WORKERS = 16
 FILTERABLE_FIELD_NAMES = [
+    '_geo',
     'altitude',
     'audio_bit_depth',
     'audio_bit_rate',
@@ -33,6 +34,7 @@ FILTERABLE_FIELD_NAMES = [
     'width'
 ]
 SORTABLE_FIELD_NAMES = [
+    '_geo',
     'duration',
     'creation_date'
 ]
@@ -44,7 +46,7 @@ for attempt in range(30):
     except:
         time.sleep(1 * attempt)
             
-def inspect(pdoc, cdoc, fp, dir):
+def handle_document_changed(pdoc, cdoc, fp, dir):
     version = None
     version_path = dir / f"{NAME}.json"
     if version_path.exists():

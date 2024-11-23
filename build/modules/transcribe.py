@@ -211,7 +211,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 {chr(10).join(dialogue_lines)}
 """
 
-model = whisperx.load_model("medium", device="cpu", compute_type="int8", language="en", threads=16, download_root="/data/pytorch")
+model = whisperx.load_model("medium", device="cpu", compute_type="int8", language="en", threads=16, download_root="/app/data/pytorch")
 model_a, metadata = whisperx.load_align_model(language_code="en", device="cpu")
 align_model = model_a
 align_metadata = metadata

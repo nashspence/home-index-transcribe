@@ -20,7 +20,7 @@ SUPPORTED_MIME_TYPES = {
     "video/x-ms-asf", "video/x-ms-wmv", "video/3gpp", "video/3gpp2"
 }
 
-def inspect(pdoc, cdoc, fp, dir):
+def handle_document_changed(pdoc, cdoc, fp, dir):
     if not cdoc["type"] in SUPPORTED_MIME_TYPES:
         return False
     if not 'creation_date' in cdoc:
