@@ -36,7 +36,8 @@ RUN pip install \
     xxhash
 
 COPY index.py .
-COPY modules .
+COPY indexer_module.py .
+COPY modules ./modules/
 
 ENV PYTHONPATH="/app/modules:${PYTHONPATH}"
 

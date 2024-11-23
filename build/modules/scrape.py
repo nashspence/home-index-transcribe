@@ -1,4 +1,3 @@
-import asyncio
 import datetime
 import exiftool
 import ffmpeg
@@ -10,48 +9,16 @@ import re
 import subprocess
 import tempfile
 import tika
-import time
 tika.TikaClientOnly = True
 
-from concurrent.futures import ProcessPoolExecutor
 from functools import cmp_to_key
 from pathlib import Path
-from multiprocessing import cpu_count
 from requests.exceptions import RequestException, ReadTimeout
-from tika import parser, config
+from scrape_meta import NAME, VERSION, TIKA_MIMES
+from tika import parser
 from urllib3.exceptions import HTTPError
 
 logger = logging
-
-NAME = "scrape"
-VERSION = 1
-FILTERABLE_FIELD_NAMES = [
-    'altitude',
-    'audio_bit_depth',
-    'audio_bit_rate',
-    'audio_channels',
-    'audio_codec',
-    'audio_sample_rate',
-    'camera_lens_make',
-    'camera_lens_model',
-    'creation_date',
-    'creation_date_format'
-    'creation_date_timezone_name',
-    'device_make',
-    'device_model',
-    'duration',
-    'height',
-    'latitude',
-    'longitude'
-    'video_bit_rate',
-    'video_codec',
-    'video_frame_rate',
-    'width'
-]
-SORTABLE_FIELD_NAMES = [
-    'duration',
-    'creation_date'
-]
 
 AUDIO_MIME_TYPES = {
     "audio/aac", "audio/flac", "audio/mpeg", "audio/mp4", "audio/ogg", 
@@ -91,7 +58,7 @@ ARCHIVE_MIME_TYPES = {
     'application/x-xz', 'application/x-lzip', 'application/x-lzma'
 }
 
-TIKA_MIMES = None
+TIKA_SUPPORTED_MIMES = TIKA_MIMES - (AUDIO_MIME_TYPES | VIDEO_MIME_TYPES | IMAGE_MIME_TYPES | ARCHIVE_MIME_TYPES)
 
 EXIFTOOL_MIMES = AUDIO_MIME_TYPES | VIDEO_MIME_TYPES | IMAGE_MIME_TYPES
 FFPROBE_LIBMEDIA_MIMES = AUDIO_MIME_TYPES | VIDEO_MIME_TYPES
@@ -1053,50 +1020,6 @@ def parse_text_field(d, fieldname):
         return {'text': cleaned_text} if cleaned_text else None
     return None
 
-# Specialized helper for embedded images
-def parse_embedded_image(d, start_field, length_field, output_field):
-    start, start_field_path = get_first(d, start_field)
-    length, length_field_path = get_first(d, length_field)
-    if start and length:
-        try:
-            start_val = int(str(start).strip())
-            length_val = int(str(length).strip())
-            logger.debug(f'"{output_field}" found "{start_field_path}" = "{start_val}", length "{length_field_path}" = "{length_val}"')
-            return {output_field: f"bytes={start_val}-{start_val + length_val}"}
-        except ValueError as e:
-            logger.error(f"Error parsing embedded image fields '{start_field}' or '{length_field}': {e}")
-            return None
-    return None
-
-# Specialized helper for multi-image ranges
-byte_length_regex = r"\(Binary data (\d+) bytes, use -b option to extract\)"
-
-def calculate_multi_pic_ranges(d):
-    image_byte_ranges = []
-    try:
-        multi_pic_0_start_str, fieldpath_start = get_first(d, 'multi_pic_0_start')
-        multi_pic_0_length_str, fieldpath_length = get_first(d, 'multi_pic_0_length')
-        if multi_pic_0_start_str and multi_pic_0_length_str:
-            logger.debug(f'multipic found "{fieldpath_start}" = "{multi_pic_0_start_str}", length "{fieldpath_length}" = "{multi_pic_0_length_str}"')
-            multi_pic_0_start = int(str(multi_pic_0_start_str).strip())
-            multi_pic_0_length = int(str(multi_pic_0_length_str).strip())
-            multi_pic_0_end = multi_pic_0_start + multi_pic_0_length
-            image_byte_ranges.append(f"bytes={multi_pic_0_start}-{multi_pic_0_end}")
-            current_start = multi_pic_0_end
-            additional_lengths = d.get('multi_pic_additional_length', [])
-            for additional_length_data, fieldpath in additional_lengths:
-                match = re.search(byte_length_regex, additional_length_data)
-                if match:
-                    additional_length = int(match.group(1))
-                    logger.debug(f'multipic found "{fieldpath}" start = "{current_start}", length = "{additional_length}"')
-                    current_end = current_start + additional_length
-                    image_byte_ranges.append(f"bytes={current_start}-{current_end}")
-                    current_start = current_end
-    except (KeyError, ValueError, IndexError) as e:
-        logger.error(f"Error calculating multi image ranges: {e}")
-        return None
-    return {"image_byte_ranges": image_byte_ranges}
-
 AUDIO_BIT_RATE = ({
     'audio_bit_rate': [
         'ffprobe.format.bit_rate',
@@ -1171,63 +1094,6 @@ DEVICE_MODEL = ({
         'exiftool."ICC_Profile:DeviceModel"'
     ]
 }, lambda d: parse_field(d, 'device_model', str))
-
-EMBEDDED_PREVIEW_IMAGE = ({
-    'embed_preview_img_start': [
-        'exiftool."EXIF:PreviewImageStart"'
-    ],
-    'embed_preview_img_length': [
-        'exiftool."EXIF:PreviewImageLength"'
-    ]
-}, lambda d: parse_embedded_image(d, 'embed_preview_img_start', 'embed_preview_img_length', 'embed_preview_img'))
-
-EMBEDDED_THUMBNAIL_IMAGE = ({
-    'embed_thumbnail_img_start': [
-        'exiftool."EXIF:ThumbnailOffset"'
-    ],
-    'embed_thumbnail_img_length': [
-        'exiftool."EXIF:ThumbnailLength"'
-    ]
-}, lambda d: parse_embedded_image(d, 'embed_thumbnail_img_start', 'embed_thumbnail_img_length', 'embed_thumbnail_img'))
-
-EMBEDDED_JPGFROMRAW_IMAGE = ({
-    'embed_jpgfromraw_img_start': [
-        'exiftool."EXIF:JpgFromRawStart"'
-    ],
-    'embed_jpgfromraw_img_length': [
-        'exiftool."EXIF:JpgFromRawLength"'
-    ]
-}, lambda d: parse_embedded_image(d, 'embed_jpgfromraw_img_start', 'embed_jpgfromraw_img_length', 'embed_jpgfromraw_img'))
-
-MULTIIMAGE = ({
-    'multi_pic_0_start': [
-        'exiftool."MPF:MPImageStart"'
-    ],
-    'multi_pic_0_length': [
-        'exiftool."MPF:MPImageLength"'
-    ],
-    'multi_pic_additional_length': [
-        'exiftool."MPF:MPImage2"',
-        'exiftool."MPF:MPImage3"',
-        'exiftool."MPF:MPImage4"',
-        'exiftool."MPF:MPImage5"',
-        'exiftool."MPF:MPImage6"',
-        'exiftool."MPF:MPImage7"',
-        'exiftool."MPF:MPImage8"', 
-        'exiftool."MPF:MPImage9"', 
-        'exiftool."MPF:MPImage10"',
-        'exiftool."MPF:MPImage11"',
-        'exiftool."MPF:MPImage12"',
-        'exiftool."MPF:MPImage13"',
-        'exiftool."MPF:MPImage14"',
-        'exiftool."MPF:MPImage15"',
-        'exiftool."MPF:MPImage16"', 
-        'exiftool."MPF:MPImage17"', 
-        'exiftool."MPF:MPImage18"', 
-        'exiftool."MPF:MPImage19"', 
-        'exiftool."MPF:MPImage20"',
-    ]
-}, calculate_multi_pic_ranges)
 
 VIDEO_DURATION = ({
     'duration': [
@@ -1315,12 +1181,8 @@ DESIRED_VIDEO = [
     CAMERA_LENS_MODEL,
     DEVICE_MAKE,
     DEVICE_MODEL,
-    EMBEDDED_JPGFROMRAW_IMAGE,
-    EMBEDDED_PREVIEW_IMAGE,
-    EMBEDDED_THUMBNAIL_IMAGE,
     HEIGHT,
     LOCATION,
-    MULTIIMAGE,
     TIMESTAMP,
     VIDEO_BIT_RATE,
     VIDEO_CODEC,
@@ -1346,12 +1208,8 @@ DESIRED_IMAGE = [
     CAMERA_LENS_MODEL,
     DEVICE_MAKE,
     DEVICE_MODEL,
-    EMBEDDED_JPGFROMRAW_IMAGE,
-    EMBEDDED_PREVIEW_IMAGE,
-    EMBEDDED_THUMBNAIL_IMAGE,
     HEIGHT,
     LOCATION,
-    MULTIIMAGE,
     TIMESTAMP,
     WIDTH
 ]
@@ -1481,11 +1339,9 @@ def scrape_with_os(file_path):
         logger.warning(f'{NAME} os stat failed "{file_path}": {e}')
         return None
 
-tika = None
-tika_parser = None
 def scrape_with_tika(file_path):
     try:
-        parsed = tika_parser.from_file(file_path, requestOptions={'timeout': 60})
+        parsed = parser.from_file(file_path, requestOptions={'timeout': 60})
         metadata = parsed["metadata"]
         if parsed["content"]:
             metadata['X-TIKA:content'] = parsed["content"]
@@ -1539,174 +1395,81 @@ def scrape_file_path(file_path):
 
     logger.debug(f'scraped metadata from file path "{result}"')
     return result
-        
-def is_processing_needed(file_path, document, doc_db_path):
-    version = None
+    
+def main(file_path, document, doc_db_path, mtime, _logger):
+    global logger
+    logger = _logger
+    logger.info(f'{NAME} start {file_path}')
+
     version_path = doc_db_path / f"{NAME}.json"
     metadata_path = doc_db_path / "metadata.json"
     txt_path = doc_db_path / "text.txt"
+    
+    metadata = {}
+    metadata["fs"] = scrape_with_os(file_path)
+    metadata["filepath"] = scrape_file_path(file_path)
+    if document["type"] in EXIFTOOL_MIMES:
+        logger.info(f"start exiftool")
+        metadata["exiftool"] = scrape_with_exiftool(file_path)
+        logger.info(f"end exiftool")
+        logger.debug('added exiftool scraping task')
+    if document["type"] in FFPROBE_LIBMEDIA_MIMES:
+        logger.info(f"start ffprobe")
+        metadata["ffprobe"] = scrape_with_ffprobe(file_path)
+        logger.info(f"end ffprobe")
+        logger.info(f"start libmediainfo")
+        metadata["libmediainfo"] = scrape_with_libmediainfo(file_path)
+        logger.info(f"end libmediainfo")
+        logger.debug('added ffprobe and libmediainfo scraping tasks')
+    if document["type"] in TIKA_SUPPORTED_MIMES:
+        logger.info(f"start tika")
+        metadata["tika"] = scrape_with_tika(file_path)
+        logger.info(f"end tika")
+        logger.debug('added tika scraping task')
+    
+    logger.debug(f'scraping results collected: {metadata.keys()}')
+
+    if document["type"] in VIDEO_MIME_TYPES:
+        desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_VIDEO)
+    elif document["type"] in AUDIO_MIME_TYPES:
+        desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_AUDIO)
+    elif document["type"] in IMAGE_MIME_TYPES:
+        desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_IMAGE)
+    else:
+        desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
+    
+    logger.debug(f'added fields to document "{desired_fields}"')
+    
     if version_path.exists():
         with open(version_path, 'r') as file:
-            version = json.load(file)  
-    if version and version.get("file_path") == file_path and version.get("version") == VERSION:
-        return False
-    if version:
-        if "added_fields" in version:
-            for field in version["added_fields"]:
-                document.pop(field, None)
-        if metadata_path.exists():
-            os.remove(metadata_path)
-        if txt_path.exists():
-            os.remove(txt_path)
-    return True
-        
-async def init():
-    global TIKA_MIMES
-    for attempt in range(30):
-        try:
-            TIKA_MIMES = set(json.loads(config.getMimeTypes())) - (VIDEO_MIME_TYPES | AUDIO_MIME_TYPES | IMAGE_MIME_TYPES | ARCHIVE_MIME_TYPES)
-            return
-        except:
-            time.sleep(1 * attempt)
+            version_info = json.load(file)
+        logger.debug(f'nulling old fields for {file_path}')
+        if "added_fields" in version_info:
+            for field in version_info["added_fields"]:
+                document[field] = None
+                
+    added_fields = []
+    for key, value in (desired_fields or {}).items():
+        document[key] = value
+        added_fields.append(key)
 
-async def cleanup():
-    return
+    with open(version_path, 'w') as file:
+        json.dump({
+            "version": VERSION,
+            "file_path": file_path,
+            "added_fields": added_fields
+        }, file, indent=4, separators=(", ", ": "))
+    logger.debug(f'updated version.json at {version_path} with added fields: {added_fields}')
 
-def process_file(file):
-    try:
-        fp, doc, spath, mtime = file
-        result = get_document(fp, doc, spath, mtime)
-        return result, {"success": 1}
-    except Exception as e:
-        logging.error(f'{NAME} {fp} failed: {e.__cause__ if e.__cause__ else e}')
-        return None, {"failure": 1}
-
-async def process_files(file_list, cancel_event):    
-    executor = ProcessPoolExecutor(max_workers=cpu_count())
+    with open(metadata_path, 'w') as file:
+        json.dump(metadata, file, indent=4, separators=(", ", ": "))
+    logger.debug('wrote metadata to metadata.json')
     
-    try:
-        loop = asyncio.get_running_loop()
-        tasks = [
-            loop.run_in_executor(executor, process_file, file)
-            for file in file_list
-        ]
-        stats = {
-            "success": 0,
-            "failure": 0,
-            "cancelled": 0
-        }
-        is_cancelled = False
-        for future in asyncio.as_completed(tasks):
-            try:
-                result, stat = await future
-                for key in stats:
-                    stats[key] += stat.get(key, 0)
-                if result:
-                    yield result
-                if cancel_event.is_set() and not is_cancelled:
-                    logging.debug(f"{NAME} finishing already started files, cancelling the rest")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    is_cancelled = True
-            except asyncio.CancelledError:
-                stats["cancelled"] += 1
-            except Exception:
-                logging.exception("unhandled task exception")
-    finally:
-        executor.shutdown()
-        
-    logging.info("------------------------------------------")
-    logging.info(f"{NAME} shutdown summary:")
-    logging.info(f"  {stats['success']} succeeded")
-    logging.info(f"  {stats['failure']} failed")
-    logging.info(f"  {stats['cancelled']} postponed ")
-    logging.info("------------------------------------------")
-    
-def get_document(file_path, document, doc_db_path, mtime):
-    global logger   
-    
-    log_path = doc_db_path / "log.text"
-    version_path = doc_db_path / f"{NAME}.json"
-    metadata_path = doc_db_path / "metadata.json"
-    txt_path = doc_db_path / "text.txt"
+    if "tika" in metadata and metadata["tika"] is not None and "X-TIKA:content" in metadata["tika"]:
+        with open(txt_path, 'w') as file:
+            file.write(metadata["tika"]["X-TIKA:content"])
+        logger.debug('wrote plain text to plain_text.txt')
 
-    logger = logging.getLogger(f'{document["id"]} {file_path}')
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-    console_handler = logging.StreamHandler() 
-    console_handler.setLevel(logging.ERROR)
-    console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s')
-    console_handler.setFormatter(console_formatter)
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-    
-    try:
-        logger.info(f'{NAME} start {file_path}')
-        added_fields = []
-        
-        metadata = {}
-        metadata["fs"] = scrape_with_os(file_path)
-        metadata["filepath"] = scrape_file_path(file_path)
-        if document["type"] in EXIFTOOL_MIMES:
-            logger.info(f"start exiftool")
-            metadata["exiftool"] = scrape_with_exiftool(file_path)
-            logger.info(f"end exiftool")
-            logger.debug('added exiftool scraping task')
-        if document["type"] in FFPROBE_LIBMEDIA_MIMES:
-            logger.info(f"start ffprobe")
-            metadata["ffprobe"] = scrape_with_ffprobe(file_path)
-            logger.info(f"end ffprobe")
-            logger.info(f"start libmediainfo")
-            metadata["libmediainfo"] = scrape_with_libmediainfo(file_path)
-            logger.info(f"end libmediainfo")
-            logger.debug('added ffprobe and libmediainfo scraping tasks')
-        if document["type"] in TIKA_MIMES:
-            logger.info(f"start tika")
-            metadata["tika"] = scrape_with_tika(file_path)
-            logger.info(f"end tika")
-            logger.debug('added tika scraping task')
-        
-        logger.debug(f'scraping results collected: {metadata.keys()}')
-
-        if document["type"] in VIDEO_MIME_TYPES:
-            desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_VIDEO)
-        elif document["type"] in AUDIO_MIME_TYPES:
-            desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_AUDIO)
-        elif document["type"] in IMAGE_MIME_TYPES:
-            desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_IMAGE)
-        else:
-            desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
-        
-        logger.debug(f'added fields to document "{desired_fields}"')
-
-        for key, value in (desired_fields or {}).items():
-            document[key] = value
-            added_fields.append(key)
-
-        with open(version_path, 'w') as file:
-            json.dump({
-                "version": VERSION,
-                "file_path": file_path,
-                "added_fields": added_fields
-            }, file, indent=4, separators=(", ", ": "))
-        logger.debug(f'updated version.json at {version_path} with added fields: {added_fields}')
-
-        with open(metadata_path, 'w') as file:
-            json.dump(metadata, file, indent=4, separators=(", ", ": "))
-        logger.debug('wrote metadata to metadata.json')
-        
-        if "tika" in metadata and metadata["tika"] is not None and "X-TIKA:content" in metadata["tika"]:
-            with open(txt_path, 'w') as file:
-                file.write(metadata["tika"]["X-TIKA:content"])
-            logger.debug('wrote plain text to plain_text.txt')
-
-        logger.info(f'{NAME} done')
-        return document
-    finally:
-        file_handler.close()
-        console_handler.close()
-        logger.removeHandler(console_handler)
-        logger.removeHandler(file_handler)
+    logger.info(f'{NAME} done')
+    return document
 
