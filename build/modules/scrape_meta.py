@@ -27,8 +27,6 @@ FILTERABLE_FIELD_NAMES = [
     'device_model',
     'duration',
     'height',
-    'latitude',
-    'longitude'
     'video_bit_rate',
     'video_codec',
     'video_frame_rate',
