@@ -333,7 +333,7 @@ def metadata_dir_path_from_doc(doc):
     return Path(METADATA_DIRECTORY) / doc["id"]
 
 
-conn = sqlite3.connect(CACHE_FILE_PATH)
+conn = sqlite3.connect(CACHE_FILE_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")  # Enables WAL mode
 
 
