@@ -132,7 +132,7 @@ async def init_meili():
     filterable_attributes = [
         "id",
         "type",
-        "modified_date",
+        "mtime",
         "size",
         "urls",
     ] + list(chain(*[module.FILTERABLE_FIELD_NAMES for module in modules]))
@@ -141,7 +141,7 @@ async def init_meili():
         logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
         await index.update_sortable_attributes(
-            ["modified_date", "size"]
+            ["mtime", "size"]
             + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules]))
         )
     except Exception:
@@ -333,6 +333,7 @@ def url_from_relative_path(relative_path):
     encoded_path = quote(relative_path)
     return f"https://{DOMAIN}/{encoded_path}"
 
+
 def metadata_dir_path_from_doc(doc):
     Path(METADATA_DIRECTORY) / doc["id"]
 
@@ -497,9 +498,9 @@ def get_document_for_hash(doc_id, file_infos):
         # Construct the updated document
         document = {
             "id": doc_id,
-            "modified_date": max(
+            "mtime": max(
                 max_mtime,
-                existing_document.get("modified_date", 0) if existing_document else 0,
+                existing_document.get("mtime", 0) if existing_document else 0,
             ),
             "paths": (
                 list(urls.union(set(existing_document.get("paths", []))))
@@ -518,7 +519,7 @@ def get_document_for_hash(doc_id, file_infos):
         # Check if the document has changed by comparing key fields
         document_changed = (
             existing_document is None
-            or document["modified_date"] != existing_document.get("modified_date")
+            or document["mtime"] != existing_document.get("mtime")
             or document["size"] != existing_document.get("size")
             or document["type"] != existing_document.get("type")
             or set(document["paths"]) != set(existing_document.get("paths", []))

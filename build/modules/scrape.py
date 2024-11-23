@@ -205,6 +205,14 @@ def extract_location_data(data):
     for extractor in [from_iso6709, from_gps_coordinates, from_gps_position, from_lat_long]:
         result = extractor()
         if result:
+            if result["latitude"] and result['longitude']:
+                # this is how meilisearch likes gps data
+                result['_geo'] = {
+                    "lat": result["latitude"],
+                    "lng": result['longitude']
+                }
+                del result['latitude']
+                del result['longitude']
             return result
 
     logger.debug("location not found")
