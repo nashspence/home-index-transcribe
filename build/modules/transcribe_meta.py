@@ -4,7 +4,7 @@ NAME = "transcribe"
 VERSION = 6
 PATH = "/app/modules/transcribe.py"
 MAX_WORKERS = 1
-FILTERABLE_FIELD_NAMES = []
+FILTERABLE_FIELD_NAMES = ["transcribed_audio"]
 SORTABLE_FIELD_NAMES = []
 
 SUPPORTED_MIME_TYPES = {

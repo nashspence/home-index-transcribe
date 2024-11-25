@@ -29,16 +29,18 @@ RUN pip install \
     numpy \
     pdf2image \
     pyexiftool \
+    pyinotify \
     python-magic \
     tika \
     wand \
-    watchdog \
     xxhash
 
-COPY index.py .
-COPY indexer_module.py .
+COPY main.py .
+COPY shared.py .
+COPY inotify_module.py .
+COPY process_tasks_module.py .
 COPY modules ./modules/
 
 ENV PYTHONPATH="/app/modules:${PYTHONPATH}"
 
-ENTRYPOINT ["/usr/local/bin/python", "/app/index.py"]
+ENTRYPOINT ["/usr/local/bin/python", "/app/main.py"]

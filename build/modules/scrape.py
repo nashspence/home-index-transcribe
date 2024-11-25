@@ -16,7 +16,7 @@ from pathlib import Path
 from requests.exceptions import RequestException, ReadTimeout
 from scrape_meta import NAME, VERSION, TIKA_MIMES
 from tika import parser
-from urllib3.exceptions import HTTPError
+from urllib3.exceptions import HTTPError, ConnectionError
 
 logger = logging
 
