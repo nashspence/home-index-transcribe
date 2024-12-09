@@ -22,6 +22,7 @@ WORKDIR /app
 
 RUN pip install \
     Pillow \
+    easyocr \
     ffmpeg-python \
     git+https://github.com/m-bain/whisperx.git \
     jmespath \
@@ -31,6 +32,7 @@ RUN pip install \
     pyexiftool \
     pyinotify \
     python-magic \
+    rawpy \
     tika \
     wand \
     xxhash

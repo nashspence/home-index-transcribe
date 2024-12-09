@@ -245,8 +245,8 @@ def main(file_path, document, doc_db_path, mtime, _logger):
     if segments:    
         plain_text = " ".join([segment["text"].strip() for segment in result["segments"]]).strip()
         plain_text = " ".join(plain_text.split())
-        logger.info(plain_text)             
-        document["transcribed_audio"] = plain_text
+        transcribed_audio = re.sub(r'\s{2,}', ' ', re.sub(r'[^\w\s]+|\s{2,}', ' ', str(plain_text))).strip().lower()         
+        document["transcribed_audio"] = transcribed_audio
         
         with open(transcription_path, 'w') as file:
             json.dump(result, file, indent=4)

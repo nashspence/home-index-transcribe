@@ -310,7 +310,8 @@ async def sync_documents():
 
     file_infos_by_hash = defaultdict(list)
     for file_info in all_file_infos:
-        file_infos_by_hash[file_info["id"]].append(file_info)
+        if file_info:
+            file_infos_by_hash[file_info["id"]].append(file_info)
 
     logging.info("collect documents")
     file_hashes = set()
@@ -323,7 +324,7 @@ async def sync_documents():
             docs_to_update_in_meili.append(document)
             logging.debug(f'queued document "{hash}" for add/update')
         if is_document_dead:
-            dead_doc_ids.add(document["id"])
+            dead_doc_ids.add(hash)
          
     logging.info("cleanup hash cache and metadata database")   
     file_system_db_ids = set()

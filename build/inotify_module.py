@@ -5,7 +5,7 @@ import shutil
 import threading
 
 from meilisearch_python_sdk import Client
-from shared import MEILISEARCH_HOST, MEILISEARCH_INDEX_NAME, METADATA_DIRECTORY, gather_file_info, get_document_for_hash, delete_from_cache, move_in_cache, INDEX_DIRECTORY, get_from_cache, is_in_archive_directory
+from shared import MEILISEARCH_HOST, MEILISEARCH_INDEX_NAME, METADATA_DIRECTORY, gather_file_info, get_document_for_hash, delete_from_cache, move_in_cache, INDEX_DIRECTORY, get_from_cache, read_document_json, write_document_json, is_in_archive_directory, handle_document_changed, validate_and_update_document_paths
 
 class EventHandler(pyinotify.ProcessEvent):
     def __init__(self):
@@ -16,7 +16,8 @@ class EventHandler(pyinotify.ProcessEvent):
         self.timer = None
         self.debounce_delay = 60
         self.update_batch = {}
-        self.delete_batch = {}
+        self.delete_batch = set()
+        self.move_events = {}
         
     def is_in_index_directory(self, path):
         try:
@@ -30,30 +31,47 @@ class EventHandler(pyinotify.ProcessEvent):
         except ValueError:
             return False
 
-    def record_event(self, path, event_type, move_from_path=None):
-        with self.lock:
-            if move_from_path and event_type in ['move']:
-                move_in_cache(move_from_path, path)
-                logging.debug(f'{event_type} event caused moved hash cache entry from "{move_from_path}" to "{path}"')
-            if event_type in ['delete', 'modify'] and not is_in_archive_directory(path):
-                cache_entry = get_from_cache(path)
-                doc_id = cache_entry["hash"]
-                if doc_id:
+    def _handle_delete_path(self, path, doc_id, document):
+        if document:
+            paths = set(document['paths'])
+            relative_path = os.path.relpath(path, INDEX_DIRECTORY)
+            if not is_in_archive_directory(path) and relative_path in paths:
+                existing_document = document.copy()
+                paths.remove(relative_path)
+                delete_from_cache(path)
+                document['paths'] = list(paths)
+                if document['paths']:
+                    document['copies'] = len(document['paths'])
+                    handle_document_changed(existing_document, document)
+                    write_document_json(document)
+                    self.update_batch[doc_id] = document
+                else:
                     metadata_entry_path = os.path.join(METADATA_DIRECTORY, doc_id)
                     if os.path.exists(metadata_entry_path):
                         shutil.rmtree(metadata_entry_path)
-                        logging.debug(f'removed "{metadata_entry_path}"')
-                    delete_from_cache(path)
-                    logging.debug(f'{event_type} event caused delete "{path}" from hash cache')
                     self.delete_batch.add(doc_id)
-                else:
-                    logging.warning(f'{event_type} event for "{path}" failed to find previous hash id')
-            if event_type in ['create', 'move', 'modify']:
-                file_info = gather_file_info(path)
-                document, is_changed, is_dead = get_document_for_hash(
-                    file_info["id"], [file_info], move_from_path
-                )
-                self.update_batch[document["id"]] = document     
+                    if doc_id in self.update_batch:
+                        del self.update_batch[doc_id]
+
+    def record_event(self, path, event_type, move_from_path=None):
+        with self.lock:
+            if event_type == 'move' and move_from_path:
+                move_in_cache(move_from_path, path)
+            if not os.path.exists(path) or event_type == "modify":
+                cache_entry = get_from_cache(path)
+                if cache_entry:
+                    old_doc_id = cache_entry["hash"]
+                    old_document, is_version_changed = read_document_json(old_doc_id)
+                    self._handle_delete_path(path, old_doc_id, old_document)
+            if not os.path.exists(path):
+                return
+            file_info = gather_file_info(path)
+            doc_id = file_info["id"]
+            document, is_changed, is_dead = get_document_for_hash(doc_id, [file_info])
+            if is_dead:
+                self._handle_delete_path(path, doc_id, document)
+            elif is_changed:
+                self.update_batch[doc_id] = document
             if self.timer:
                 self.timer.cancel()
             self.timer = threading.Timer(self.debounce_delay, self.process_pending_events)
@@ -117,15 +135,15 @@ class EventHandler(pyinotify.ProcessEvent):
 
     def process_pending_events(self):
         with self.lock:
-            documents_to_update = self.update_batch.copy()
-            documents_to_delete = self.delete_batch.copy()
+            documents_to_update = list(self.update_batch.values())
+            documents_to_delete = list(self.delete_batch)
             self.update_batch.clear()
             self.delete_batch.clear()
             self.timer = None  # Reset the timer
         if documents_to_update:
             self.index.update_documents(documents_to_update)
             logging.info(
-                f'added or updated {len(documents_to_update)} in meili'
+                f'upserted {len(documents_to_update)} in meili'
             )
         if documents_to_delete:
             self.index.delete_documents(documents_to_delete)
@@ -154,6 +172,6 @@ def start_inotify():
     notifier = pyinotify.Notifier(wm, handler)
     wm.add_watch(INDEX_DIRECTORY, mask, rec=True, auto_add=True)
 
-    logging.info("Starting inotify watcher")
+    logging.info("start inotify watcher")
     notifier.loop()
     

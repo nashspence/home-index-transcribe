@@ -4,8 +4,6 @@ services:
     container_name: meilisearch
     depends_on:
       - grafana-promtail
-    dns:
-      - 172.21.0.200
     environment:
       - MEILI_LOG_LEVEL=debug
       - MEILI_NO_ANALYTICS=true
@@ -13,8 +11,6 @@ services:
     expose:
       - '7700'
     image: getmeili/meilisearch:latest
-    networks:
-      safenet: null
     restart: unless-stopped
     volumes:
       - /home/ns/services/meilisearch/volumes/data:/meili_data
@@ -25,15 +21,11 @@ services:
       - grafana-promtail
       - meilisearch
       - tika
-    dns:
-      - 172.21.0.200
     environment:
       - DOMAIN=private.0819870.xyz
       - MEILISEARCH_HOST=http://meilisearch:7700
       - TIKA_SERVER_ENDPOINT=http://tika:9998
       - TZ=America/Los_Angeles
-    networks:
-      safenet: null
     restart: unless-stopped
     volumes:
       - /home/ns/services/meilisearch/volumes/indexer:/app/data

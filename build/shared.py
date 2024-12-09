@@ -8,11 +8,12 @@ import time
 import xxhash
 import scrape_meta
 import transcribe_meta
+import read_meta
 
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
-modules = [scrape_meta, transcribe_meta]
+modules = [scrape_meta, read_meta, transcribe_meta]
 
 VERSION = 1
 ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
@@ -100,7 +101,7 @@ def delete_from_cache(file_path):
 def move_in_cache(src_file_path, dest_file_path):
     src_data = get_from_cache(src_file_path)
     if not src_data:
-        raise ValueError(f"No data found for source path: {src_file_path}")
+        return
     upsert_into_cache(dest_file_path, src_data['mtime'], src_data['hash'])
     delete_from_cache(src_file_path)
 
@@ -164,6 +165,9 @@ def gather_file_info(file_path):
         }
         logging.debug(f'file info for "{file_path}": id="{file_hash}", mtime="{mtime}"')
         return file_info
+    except FileNotFoundError:
+        logging.warning(f'"{file_path}" is now deleted, skipping')
+        return None
     except Exception as e:
         logging.exception(f'failed to gather file info for "{file_path}": {e}')
         return None
@@ -220,7 +224,19 @@ def handle_document_changed(pdoc, cdoc):
     write_document_json(cdoc)
     return cdoc
 
-def get_document_for_hash(doc_id, file_infos, move_path=None):
+def validate_and_update_document_paths(document):
+    valid_paths = set()
+    for path in document["paths"]:
+        absolute_path = path_from_relative_path(path)
+        if is_in_archive_directory(absolute_path) or os.path.exists(absolute_path):
+            valid_paths.add(path)
+        else:
+            delete_from_cache(path)
+    document["paths"] = list(valid_paths)
+    document["copies"] = len(valid_paths)
+    return len(valid_paths) == 0
+
+def get_document_for_hash(doc_id, file_infos):
     try:
         logging.debug(f'processing files with id "{doc_id}"')
         paths = set()
@@ -246,7 +262,7 @@ def get_document_for_hash(doc_id, file_infos, move_path=None):
                 existing_document.get("mtime", 0) if existing_document else 0,
             ),
             "paths": (
-                list((paths.union(set(existing_document.get("paths", [])))) - {move_path})
+                list((paths.union(set(existing_document.get("paths", [])))))
                 if existing_document
                 else list(paths)
             ),
@@ -263,7 +279,9 @@ def get_document_for_hash(doc_id, file_infos, move_path=None):
         if not valid_paths:
             return document, True, True
         
-        document["paths"] = list(valid_paths)
+        valid_paths_list = list(valid_paths)
+        document["paths"] = valid_paths_list
+        document["copies"] = len(valid_paths_list)
 
         # Check if the document has changed by comparing key fields
         document_changed = (
@@ -272,6 +290,7 @@ def get_document_for_hash(doc_id, file_infos, move_path=None):
             or document["size"] != existing_document.get("size")
             or document["type"] != existing_document.get("type")
             or set(document["paths"]) != set(existing_document.get("paths", []))
+            or document["copies"] != existing_document.get("copies")
             or sample_file_info["is_version_updated"] == True
         )
 
@@ -283,6 +302,6 @@ def get_document_for_hash(doc_id, file_infos, move_path=None):
         )
         return document, document_changed, False
     except Exception as e:
-        logging.exception(f'failed to process documents for id "{doc_id}": {e}')
+        logging.warning(f'failed to process documents for id "{doc_id}, file likely deleted or moved"')
         return None, False, True
     
