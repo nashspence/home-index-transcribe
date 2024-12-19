@@ -211,11 +211,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 {chr(10).join(dialogue_lines)}
 """
 
-model = whisperx.load_model("medium", device="cpu", compute_type="int8", language="en", threads=16, download_root="/app/data/pytorch")
-model_a, metadata = whisperx.load_align_model(language_code="en", device="cpu")
+device = "cuda"
+batch_size = 1 # reduce if low on GPU mem
+compute_type = "int8" # change to "int8" if low on GPU mem (may reduce accuracy)
+language = "en"
+threads = 16
+num_workers=None # increasing num_workers breaks whisperX model.transcribe
+
+model = whisperx.load_model("medium", device, compute_type=compute_type, language=language, threads=threads, download_root="/app/data/pytorch")
+model_a, metadata = whisperx.load_align_model(language_code=language)
 align_model = model_a
 align_metadata = metadata
-diarize_model = whisperx.DiarizationPipeline(use_auth_token="REMOVED", device="cpu")
+diarize_model = whisperx.DiarizationPipeline(use_auth_token="REMOVED", device=device)
 
 def main(file_path, document, doc_db_path, mtime, _logger):
     global logger
@@ -227,8 +234,8 @@ def main(file_path, document, doc_db_path, mtime, _logger):
     subtitle_path = doc_db_path / "subtitle.ass"
 
     audio = whisperx.load_audio(file_path)
-    result = model.transcribe(audio, language="en", batch_size=8, num_workers=None) # increasing num_workers breaks whisperX
-    result = whisperx.align(result["segments"], align_model, align_metadata, audio, "cpu", return_char_alignments=False) 
+    result = model.transcribe(audio, language=language, batch_size=batch_size, num_workers=num_workers)
+    result = whisperx.align(result["segments"], align_model, align_metadata, audio, device, return_char_alignments=False) 
     diarize_segments = diarize_model(audio)
     result = whisperx.assign_word_speakers(diarize_segments, result)
     

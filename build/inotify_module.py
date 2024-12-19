@@ -140,20 +140,21 @@ class EventHandler(pyinotify.ProcessEvent):
             self.update_batch.clear()
             self.delete_batch.clear()
             self.timer = None  # Reset the timer
-        if documents_to_update:
-            self.index.update_documents(documents_to_update)
-            logging.info(
-                f'upserted {len(documents_to_update)} in meili'
-            )
         if documents_to_delete:
             self.index.delete_documents(documents_to_delete)
             logging.info(
                 f'deleted {len(documents_to_delete)} from meili'
             )
+        if documents_to_update:
+            self.index.update_documents(documents_to_update)
+            logging.info(
+                f'upserted {len(documents_to_update)} in meili'
+            )
     
 def start_inotify():
     logger = logging.getLogger("inotify-process")
     logger.setLevel(logging.INFO)
+    logger.propagate = False
     file_handler = logging.FileHandler(f"./data/logs/inotify-process.log")
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(file_handler)

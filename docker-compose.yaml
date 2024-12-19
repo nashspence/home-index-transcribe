@@ -21,12 +21,28 @@ services:
       - grafana-promtail
       - meilisearch
       - tika
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       - DOMAIN=private.0819870.xyz
       - MEILISEARCH_HOST=http://meilisearch:7700
+      - NVIDIA_VISIBLE_DEVICES=all
       - TIKA_SERVER_ENDPOINT=http://tika:9998
       - TZ=America/Los_Angeles
+    ipc: host
     restart: unless-stopped
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
     volumes:
       - /home/ns/services/meilisearch/volumes/indexer:/app/data
       - /home/ns/shared:/data

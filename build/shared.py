@@ -6,14 +6,12 @@ import os
 import sqlite3
 import time
 import xxhash
-import scrape_meta
-import transcribe_meta
-import read_meta
 
+from modules import scrape_meta, transcribe_meta, read_meta
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
-modules = [scrape_meta, read_meta, transcribe_meta]
+modules = [scrape_meta, transcribe_meta]
 
 VERSION = 1
 ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
@@ -25,6 +23,11 @@ MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://localhost:7700")
 MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
 METADATA_DIRECTORY = os.environ.get("METADATA_DIRECTORY", "/data/metadata")
 RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "1800"))
+
+if not os.path.exists("./data/logs"):
+    os.makedirs("./data/logs")
+if not os.path.exists(METADATA_DIRECTORY):
+    os.makedirs(METADATA_DIRECTORY)
 
 conn = sqlite3.connect(CACHE_FILE_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")  # Enables WAL mode

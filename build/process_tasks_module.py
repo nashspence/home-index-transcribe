@@ -41,11 +41,23 @@ def setup_logger(document_id, file_path, log_path, level=logging.ERROR):
 def module_initializer(module):
     global worker
     if not os.path.exists(module.PATH):
-        raise FileNotFoundError(module.PATH)
-    spec = importlib.util.spec_from_file_location("worker_module", module.PATH)
-    worker = importlib.util.module_from_spec(spec)
-    sys.modules["worker_module"] = worker
-    spec.loader.exec_module(worker)
+        raise FileNotFoundError(f"Module file not found: {module.PATH}")
+    
+    # Get the directory of the module file
+    module_dir = os.path.dirname(os.path.abspath(module.PATH))
+    
+    # Temporarily add the module directory to sys.path
+    original_sys_path = sys.path[:]
+    sys.path.insert(0, module_dir)
+    
+    try:
+        spec = importlib.util.spec_from_file_location("worker_module", module.PATH)
+        worker = importlib.util.module_from_spec(spec)
+        sys.modules["worker_module"] = worker
+        spec.loader.exec_module(worker)
+    finally:
+        # Restore the original sys.path
+        sys.path = original_sys_path
 
 def process_task(args):
     fp, doc, spath, mtime = args

@@ -1,6 +1,4 @@
-# Dockerfile
-
-FROM intel/intel-optimized-pytorch:2.4.0-idp-base
+FROM pytorch-local:latest
 
 RUN apt-get update && apt-get install -y \
     attr \
@@ -43,6 +41,4 @@ COPY inotify_module.py .
 COPY process_tasks_module.py .
 COPY modules ./modules/
 
-ENV PYTHONPATH="/app/modules:${PYTHONPATH}"
-
-ENTRYPOINT ["/usr/local/bin/python", "/app/main.py"]
+ENTRYPOINT ["python3", "/app/main.py"]

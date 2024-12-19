@@ -15,11 +15,6 @@ from meilisearch_python_sdk import AsyncClient
 from multiprocessing import Process
 from pathlib import Path
 
-if not os.path.exists("./data/logs"):
-    os.makedirs("./data/logs")
-if not os.path.exists(METADATA_DIRECTORY):
-    os.makedirs(METADATA_DIRECTORY)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
