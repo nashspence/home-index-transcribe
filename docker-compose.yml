@@ -1,21 +1,5 @@
 ---
 services:
-  devcontainer:
-    build:
-      context: .
-      dockerfile: Dockerfile.devcontainer
-    command: ["bash"]
-    container_name: home-index-devcontainer
-    environment:
-      - DOCKER_HOST=unix:///var/run/docker.sock
-    group_add:
-      - 111
-    stdin_open: true
-    tty: true
-    volumes:
-      - ./:/workspace
-      - /home/ns/.ssh:/home/vscode/.ssh:ro
-      - /var/run/docker.sock:/var/run/docker.sock
   meilisearch:
     container_name: home-index-devcontainer-meilisearch
     environment:
@@ -40,3 +24,37 @@ services:
     volumes:
       - ./bind-mounts/tika:/config
       - /home/ns/shared:/data
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: home-index-devcontainer-app
+    depends_on:
+      - meilisearch
+      - tika
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - DOMAIN=private.0819870.xyz
+      - MEILISEARCH_HOST=http://meilisearch:7700
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TIKA_SERVER_ENDPOINT=http://tika:9998
+      - TZ=America/Los_Angeles
+    ipc: host
+    restart: unless-stopped
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+    volumes:
+      - ./bind-mounts/home-index:/app/data
+      - /home/ns/shared:/data
+      - ./bind-mounts/home-index/pytorch:/root/.cache/torch/

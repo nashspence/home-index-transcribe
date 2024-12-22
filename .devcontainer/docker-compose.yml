@@ -1,0 +1,18 @@
+---
+services:
+  devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.devcontainer
+    command: ["bash"]
+    container_name: home-index-devcontainer
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    group_add:
+      - 111
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../:/workspace
+      - /home/ns/.ssh:/home/vscode/.ssh:ro
+      - /var/run/docker.sock:/var/run/docker.sock

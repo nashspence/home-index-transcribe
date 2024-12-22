@@ -6,7 +6,23 @@ import os
 import shutil
 
 from inotify_module import start_inotify
-from shared import MEILISEARCH_HOST, MEILISEARCH_INDEX_NAME, MEILISEARCH_BATCH_SIZE, METADATA_DIRECTORY, INDEX_DIRECTORY, ALLOWED_TIME_PER_MODULE, RECHECK_TIME_AFTER_COMPLETE, gather_file_infos, delete_from_cache, modules, get_document_for_hash, path_from_meili_doc, path_from_relative_path, is_in_archive_directory, handle_document_changed
+from shared import (
+    MEILISEARCH_HOST,
+    MEILISEARCH_INDEX_NAME,
+    MEILISEARCH_BATCH_SIZE,
+    METADATA_DIRECTORY,
+    INDEX_DIRECTORY,
+    ALLOWED_TIME_PER_MODULE,
+    RECHECK_TIME_AFTER_COMPLETE,
+    gather_file_infos,
+    delete_from_cache,
+    modules,
+    get_document_for_hash,
+    path_from_meili_doc,
+    path_from_relative_path,
+    is_in_archive_directory,
+    handle_document_changed,
+)
 from collections import defaultdict
 from process_tasks_module import process_tasks
 from itertools import chain
@@ -61,6 +77,7 @@ logger.propagate = False
 client = None
 index = None
 
+
 async def init_meili():
     global client, index
     logging.debug(f"meili init")
@@ -95,14 +112,16 @@ async def init_meili():
     try:
         logging.debug(f"meili update index attrs")
         await index.update_filterable_attributes(filterable_attributes)
-        await index.update_sortable_attributes([
-            "is_archived",
-            "mtime",
-            "paths",
-            "size",
-            "status",
-            "type",
-        ] + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules]))
+        await index.update_sortable_attributes(
+            [
+                "is_archived",
+                "mtime",
+                "paths",
+                "size",
+                "status",
+                "type",
+            ]
+            + list(chain(*[module.SORTABLE_FIELD_NAMES for module in modules]))
         )
     except Exception:
         logging.exception(f"meili update index attrs failed")
@@ -131,8 +150,11 @@ async def add_or_update_document(doc):
             await index.update_documents([doc])
             logging.debug(f'index.update_documents "{doc["paths"][0]}" done')
         except Exception:
-            logging.exception(f'index.update_documents "{doc["paths"][0]}" failed: "{[doc]}"')
+            logging.exception(
+                f'index.update_documents "{doc["paths"][0]}" failed: "{[doc]}"'
+            )
             raise
+
 
 async def add_or_update_documents(docs):
     if not index:
@@ -197,12 +219,12 @@ async def get_all_documents():
 async def get_all_pending_jobs(module):
     if not index:
         raise Exception("MeiliSearch index is not initialized.")
-    
+
     docs = []
     offset = 0
     limit = MEILISEARCH_BATCH_SIZE
-    filter_query = f'status = {module.NAME}'
-    
+    filter_query = f"status = {module.NAME}"
+
     try:
         while True:
             response = await index.get_documents(
@@ -218,6 +240,7 @@ async def get_all_pending_jobs(module):
     except Exception as e:
         logging.error(f"Failed to get pending jobs from MeiliSearch: {e}")
         raise
+
 
 async def wait_for_meili_idle():
     if not client:
@@ -238,6 +261,7 @@ async def wait_for_meili_idle():
         logging.exception(f"meili wait for idle failed")
         raise
 
+
 def restore_lost_docs_from_db(meili_ids, docs_to_update_in_meili):
     restored_doc_ids = set()
     logging.debug("processing metadata directory")
@@ -257,6 +281,7 @@ def restore_lost_docs_from_db(meili_ids, docs_to_update_in_meili):
                 restored_doc_ids.add(doc_id)
     return restored_doc_ids
 
+
 def filter_ids_to_delete_meili(ids_to_delete_from_meili, meili_docs_by_id):
     filtered_ids = set()
     for doc_id in ids_to_delete_from_meili:
@@ -269,6 +294,7 @@ def filter_ids_to_delete_meili(ids_to_delete_from_meili, meili_docs_by_id):
                     logging.debug(f'document "{doc_id}" marked for deletion')
                     break
     return filtered_ids
+
 
 def delete_ids_from_db(ids):
     deleted = set()
@@ -291,6 +317,7 @@ def delete_ids_from_db(ids):
                 if os.path.exists(metadata_entry_path):
                     shutil.rmtree(metadata_entry_path)
     return deleted
+
 
 async def sync_documents():
     logging.info(f"walk directory")
@@ -315,27 +342,31 @@ async def sync_documents():
     dead_doc_ids = set()
     for hash, file_infos in file_infos_by_hash.items():
         file_hashes.add(hash)
-        document, is_document_changed, is_document_dead = get_document_for_hash(hash, file_infos)
+        document, is_document_changed, is_document_dead = get_document_for_hash(
+            hash, file_infos
+        )
         if not is_document_dead and is_document_changed:
             docs_to_update_in_meili.append(document)
             logging.debug(f'queued document "{hash}" for add/update')
         if is_document_dead:
             dead_doc_ids.add(hash)
-         
-    logging.info("cleanup hash cache and metadata database")   
+
+    logging.info("cleanup hash cache and metadata database")
     file_system_db_ids = set()
     for entry in os.scandir(METADATA_DIRECTORY):
         if entry.is_dir(follow_symlinks=False):
             file_system_db_ids.add(entry.name)
     delete_ids_from_db((file_system_db_ids - file_hashes) | dead_doc_ids)
-    
+
     logging.debug("get all documents from meili")
     meili_docs = await get_all_documents()
     meili_docs_by_id = {doc["id"]: doc for doc in meili_docs}
     meili_ids = set(meili_docs_by_id.keys())
     logging.info(f"meili has {len(meili_docs)} documents")
-    ids_to_delete_from_meili = filter_ids_to_delete_meili((meili_ids - file_hashes) | dead_doc_ids, meili_docs_by_id)
-    
+    ids_to_delete_from_meili = filter_ids_to_delete_meili(
+        (meili_ids - file_hashes) | dead_doc_ids, meili_docs_by_id
+    )
+
     restored_doc_ids = restore_lost_docs_from_db(meili_ids, docs_to_update_in_meili)
 
     if len(docs_to_update_in_meili) > 0 or len(ids_to_delete_from_meili) > 0:
@@ -349,9 +380,7 @@ async def sync_documents():
         await wait_for_meili_idle()
 
     if len(restored_doc_ids) > 0:
-        logging.info(
-            f'restored {len(restored_doc_ids)} documents to meili'
-        )
+        logging.info(f"restored {len(restored_doc_ids)} documents to meili")
     if len(docs_to_update_in_meili) > 0:
         logging.info(
             f"added or updated {len(docs_to_update_in_meili)} documents in meili"
@@ -361,7 +390,8 @@ async def sync_documents():
 
     total_docs_in_meili = await get_document_count()
     logging.info(f"meili has {total_docs_in_meili} up-to-date documents")
-    
+
+
 def get_file_list(module):
     dirs_with_mtime = []
     for metadata_dir_path in Path(METADATA_DIRECTORY).iterdir():
@@ -374,14 +404,15 @@ def get_file_list(module):
                     document = json.load(file)
                     file_path = path_from_meili_doc(document)
                 mtime = os.stat(file_path).st_mtime
-                if document['status'] == module.NAME:
+                if document["status"] == module.NAME:
                     dirs_with_mtime.append(
                         (file_path, document, metadata_dir_path, mtime)
                     )
         except Exception as e:
             logging.warning(f"{module.NAME} {metadata_dir_path} failed: {e}")
-    dirs_with_mtime.sort(key=lambda x: (0 if x[1]['is_archived'] else 1, -x[3]))
+    dirs_with_mtime.sort(key=lambda x: (0 if x[1]["is_archived"] else 1, -x[3]))
     return dirs_with_mtime
+
 
 async def augment_documents(module):
     logging.debug(f"{module.NAME} select files")
@@ -392,7 +423,9 @@ async def augment_documents(module):
             cancel_event = asyncio.Event()
 
             async def document_update_handler():
-                async for pdoc, cdoc, fp in process_tasks(module, file_list, cancel_event):
+                async for pdoc, cdoc, fp in process_tasks(
+                    module, file_list, cancel_event
+                ):
                     try:
                         logging.info(f'{module.NAME} "{fp}" commit update')
                         document = handle_document_changed(pdoc, cdoc)
@@ -421,6 +454,7 @@ async def augment_documents(module):
     logging.debug(f"{module.NAME} stop")
     return True
 
+
 async def begin_indexing():
     # await sync_documents()
     logging.info(f"run modules")
@@ -438,10 +472,12 @@ async def begin_indexing():
                 log_up_to_date = False
             await asyncio.sleep(RECHECK_TIME_AFTER_COMPLETE)
 
+
 async def main():
     await init_meili()
     Process(target=start_inotify).start()
     await begin_indexing()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

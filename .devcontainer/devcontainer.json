@@ -1,12 +1,13 @@
 {
 	"name": "home-index",
-	"dockerComposeFile": "../docker-compose.yml",
+	"dockerComposeFile": "./docker-compose.yml",
 	"service": "devcontainer",
 	"workspaceFolder": "/workspace",
 	"customizations": {
 		"vscode": {
 			"extensions": [
-				"ms-vscode-remote.remote-containers"
+				"ms-azuretools.vscode-docker",
+				"ms-python.black-formatter"
 			]
 		}
 	}

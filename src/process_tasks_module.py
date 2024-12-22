@@ -10,22 +10,23 @@ from contextlib import contextmanager
 worker = None
 module_name = ""
 
+
 @contextmanager
 def setup_logger(document_id, file_path, log_path, level=logging.ERROR):
     """Context manager to set up a logger for the given document and file path."""
-    logger = logging.getLogger(f'{document_id} {file_path}')
+    logger = logging.getLogger(f"{document_id} {file_path}")
     logger.setLevel(logging.INFO)
     logger.propagate = True
     if not logger.handlers:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(level)
         console_formatter = logging.Formatter(
-            '%(asctime)s [%(levelname)s] [%(name)s] %(message)s')
+            "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+        )
         console_handler.setFormatter(console_formatter)
         file_handler = logging.FileHandler(log_path)
         file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '%(asctime)s [%(levelname)s] %(message)s')
+        file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
         file_handler.setFormatter(file_formatter)
         logger.addHandler(console_handler)
         logger.addHandler(file_handler)
@@ -39,6 +40,7 @@ def setup_logger(document_id, file_path, log_path, level=logging.ERROR):
             handler.close()
             logger.removeHandler(handler)
 
+
 def module_initializer(module):
     global worker, module_name
 
@@ -46,14 +48,14 @@ def module_initializer(module):
 
     if not os.path.exists(module.PATH):
         raise FileNotFoundError(f"Module file not found: {module.PATH}")
-    
+
     # Get the directory of the module file
     module_dir = os.path.dirname(os.path.abspath(module.PATH))
-    
+
     # Temporarily add the module directory to sys.path
     original_sys_path = sys.path[:]
     sys.path.insert(0, module_dir)
-    
+
     try:
         spec = importlib.util.spec_from_file_location("worker_module", module.PATH)
         worker = importlib.util.module_from_spec(spec)
@@ -62,6 +64,7 @@ def module_initializer(module):
     finally:
         # Restore the original sys.path
         sys.path = original_sys_path
+
 
 def process_task(args):
     fp, doc, spath, mtime = args
@@ -75,11 +78,12 @@ def process_task(args):
         logging.exception(f'{module_name} "{fp}" failed')
         return doc, None, {"failure": 1}, fp
 
+
 async def process_tasks(module, arg_list, cancel_event):
     executor = ProcessPoolExecutor(
         max_workers=module.MAX_WORKERS,
         initializer=module_initializer,
-        initargs=(module,)
+        initargs=(module,),
     )
 
     try:
@@ -90,11 +94,7 @@ async def process_tasks(module, arg_list, cancel_event):
             fp, doc, spath, mtime = args
             logging.debug(f'{module.NAME} "{fp}" start')
             tasks.append(loop.run_in_executor(executor, process_task, args))
-        stats = {
-            "success": 0,
-            "failure": 0,
-            "cancelled": 0
-        }
+        stats = {"success": 0, "failure": 0, "cancelled": 0}
         is_cancelled = False
         for future in asyncio.as_completed(tasks):
             try:
@@ -105,7 +105,9 @@ async def process_tasks(module, arg_list, cancel_event):
                 if cdoc:
                     yield pdoc, cdoc, fp
                 if cancel_event.is_set():
-                    logging.info(f"{module.NAME} finish pending tasks, then shutdown...")
+                    logging.info(
+                        f"{module.NAME} finish pending tasks, then shutdown..."
+                    )
                     is_cancelled = True
                     break
             except Exception:
