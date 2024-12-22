@@ -1,0 +1,44 @@
+---
+services:
+  devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.devcontainer
+    command: ["bash"]
+    container_name: home-index-devcontainer
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    group_add:
+      - 111
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+  meilisearch:
+    container_name: home-index-devcontainer-meilisearch
+    depends_on:
+      - grafana-promtail
+    environment:
+      - MEILI_LOG_LEVEL=debug
+      - MEILI_NO_ANALYTICS=true
+      - TZ=America/Los_Angeles
+    expose:
+      - '7700'
+    image: getmeili/meilisearch:latest
+    restart: unless-stopped
+    volumes:
+      - ./bind-mounts/meili_data:/meili_data
+  tika:
+    command: ["--config", "/config/tika-config.xml"]
+    container_name: home-index-devcontainer-tika
+    environment:
+      - TZ=America/Los_Angeles
+      - UMASK=007
+    expose:
+      - '9998'
+    image: apache/tika:latest-full
+    restart: unless-stopped
+    volumes:
+      - ./bind-mounts/tika:/config
+      - /home/ns/shared:/data

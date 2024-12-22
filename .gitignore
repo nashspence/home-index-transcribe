@@ -1,2 +1,3 @@
 .env
-volumes
+bind-mounts/
+docker-compose.override*.yml
