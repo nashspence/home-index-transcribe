@@ -13,12 +13,10 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      - ../:/workspace
+      - ./:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
   meilisearch:
     container_name: home-index-devcontainer-meilisearch
-    depends_on:
-      - grafana-promtail
     environment:
       - MEILI_LOG_LEVEL=debug
       - MEILI_NO_ANALYTICS=true
@@ -34,7 +32,6 @@ services:
     container_name: home-index-devcontainer-tika
     environment:
       - TZ=America/Los_Angeles
-      - UMASK=007
     expose:
       - '9998'
     image: apache/tika:latest-full

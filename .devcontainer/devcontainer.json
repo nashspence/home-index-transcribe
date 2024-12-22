@@ -1,5 +1,5 @@
 {
-	"name": "home-index (devcontainer)",
+	"name": "home-index",
 	"dockerComposeFile": "../docker-compose.yml",
 	"service": "devcontainer",
 	"workspaceFolder": "/workspace"
