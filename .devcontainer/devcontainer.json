@@ -2,5 +2,12 @@
 	"name": "home-index",
 	"dockerComposeFile": "../docker-compose.yml",
 	"service": "devcontainer",
-	"workspaceFolder": "/workspace"
+	"workspaceFolder": "/workspace",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-vscode-remote.remote-containers"
+			]
+		}
+	}
 }
