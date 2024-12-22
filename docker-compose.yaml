@@ -15,7 +15,7 @@ services:
     volumes:
       - /home/ns/services/meilisearch/volumes/data:/meili_data
   meilisearch-indexer:
-    build: ./build/
+    build: .
     container_name: meilisearch-indexer
     depends_on:
       - grafana-promtail

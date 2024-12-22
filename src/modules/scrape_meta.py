@@ -7,7 +7,7 @@ from tika import config
 NAME = "scrape"
 VERSION = 1
 PATH = "/app/modules/scrape.py"
-MAX_WORKERS = 16
+MAX_WORKERS = 1
 FILTERABLE_FIELD_NAMES = [
     '_geo',
     'altitude',
@@ -43,6 +43,7 @@ TIKA_MIMES = {}
 for attempt in range(30):
     try:
         TIKA_MIMES = set(json.loads(config.getMimeTypes()))
+        break
     except:
         time.sleep(1 * attempt)
             

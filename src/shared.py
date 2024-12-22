@@ -14,7 +14,7 @@ from pathlib import Path
 modules = [scrape_meta, transcribe_meta]
 
 VERSION = 1
-ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "3600"))
+ALLOWED_TIME_PER_MODULE = int(os.environ.get("ALLOWED_TIME_PER_MODULE", "300"))
 ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "/data/archive")
 CACHE_FILE_PATH = os.environ.get("CACHE_FILE_PATH", "/data/metadata/cache")
 INDEX_DIRECTORY = os.environ.get("INDEX_DIRECTORY", "/data")

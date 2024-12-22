@@ -8,13 +8,14 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 
 worker = None
+module_name = ""
 
 @contextmanager
 def setup_logger(document_id, file_path, log_path, level=logging.ERROR):
     """Context manager to set up a logger for the given document and file path."""
     logger = logging.getLogger(f'{document_id} {file_path}')
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    logger.propagate = True
     if not logger.handlers:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(level)
@@ -39,7 +40,10 @@ def setup_logger(document_id, file_path, log_path, level=logging.ERROR):
             logger.removeHandler(handler)
 
 def module_initializer(module):
-    global worker
+    global worker, module_name
+
+    module_name = module.NAME
+
     if not os.path.exists(module.PATH):
         raise FileNotFoundError(f"Module file not found: {module.PATH}")
     
@@ -62,12 +66,14 @@ def module_initializer(module):
 def process_task(args):
     fp, doc, spath, mtime = args
     try:
+        logging.info(f'{module_name} "{fp}" run task on process from pool')
         with setup_logger(doc["id"], fp, spath / "log.txt") as _logger:
             result = worker.main(fp, doc, spath, mtime, _logger)
-        return doc, result, {"success": 1}
+        logging.debug(f'{module_name} "{fp}" done')
+        return doc, result, {"success": 1}, fp
     except Exception as e:
-        logging.exception(f'Processing {args} failed: {e}')
-        return doc, None, {"failure": 1}
+        logging.exception(f'{module_name} "{fp}" failed')
+        return doc, None, {"failure": 1}, fp
 
 async def process_tasks(module, arg_list, cancel_event):
     executor = ProcessPoolExecutor(
@@ -78,10 +84,12 @@ async def process_tasks(module, arg_list, cancel_event):
 
     try:
         loop = asyncio.get_running_loop()
-        tasks = [
-            loop.run_in_executor(executor, process_task, args)
-            for args in arg_list
-        ]
+
+        tasks = []
+        for args in arg_list:
+            fp, doc, spath, mtime = args
+            logging.debug(f'{module.NAME} "{fp}" start')
+            tasks.append(loop.run_in_executor(executor, process_task, args))
         stats = {
             "success": 0,
             "failure": 0,
@@ -90,19 +98,25 @@ async def process_tasks(module, arg_list, cancel_event):
         is_cancelled = False
         for future in asyncio.as_completed(tasks):
             try:
-                pdoc, cdoc, stat = await future
+                pdoc, cdoc, stat, fp = await future
+                logging.info(f'{module.NAME} "{fp}" process completed task {stat}')
                 for key in stats:
                     stats[key] += stat.get(key, 0)
                 if cdoc:
-                    yield pdoc, cdoc
-                if cancel_event.is_set() and not is_cancelled:
-                    logging.debug(f"{module.NAME} finishing already started files, cancelling the rest")
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    yield pdoc, cdoc, fp
+                if cancel_event.is_set():
+                    logging.info(f"{module.NAME} finish pending tasks, then shutdown...")
                     is_cancelled = True
-            except asyncio.CancelledError:
-                stats["cancelled"] += 1
+                    break
             except Exception:
-                logging.exception("Unhandled task exception")
+                stats["failure"] += 1
+        if is_cancelled:
+            for task in tasks:
+                task.cancel()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception:
+                stats["cancelled"] += 1
     finally:
         executor.shutdown()
     logging.info("------------------------------------------")

@@ -1,0 +1,15 @@
+---
+services:
+  meili-file-index-devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["sleep", "infinity"]
+    container_name: meili-file-index-devcontainer
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock

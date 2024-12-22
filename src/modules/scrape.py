@@ -1,6 +1,7 @@
 import datetime
 import exiftool
 import ffmpeg
+import html
 import jmespath
 import json
 import logging
@@ -16,7 +17,7 @@ from pathlib import Path
 from requests.exceptions import RequestException, ReadTimeout
 from scrape_meta import NAME, VERSION, TIKA_MIMES
 from tika import parser
-from urllib3.exceptions import HTTPError, ConnectionError
+from urllib3.exceptions import HTTPError, ConnectionError, NewConnectionError, MaxRetryError
 
 logger = logging
 
@@ -1024,8 +1025,7 @@ def parse_text_field(d, fieldname):
     value, fieldpath = get_first(d, fieldname)
     if value:
         logger.debug(f'"{fieldname}" found at "{fieldpath}"')
-        cleaned_text = re.sub(r'\s{2,}', ' ', re.sub(r'[^\w\s]+|\s{2,}', ' ', str(value))).strip().lower()
-        return {'text': cleaned_text} if cleaned_text else None
+        return {'text': value}
     return None
 
 AUDIO_BIT_RATE = ({
@@ -1266,14 +1266,19 @@ def jmespath_search_with_shaped_list(data, list):
 def scrape_with_exiftool(file_path):
     try:
         with exiftool.ExifToolHelper() as et:
-            return et.get_metadata(file_path)[0]
+            logger.debug(f"{NAME} exiftool start")
+            metadata = et.get_metadata(file_path)[0]
+            logger.debug(f"{NAME} exiftool done")
+            return metadata
     except Exception as e:
-        logger.warning(f'{NAME} exiftool failed "{file_path}" {e}')
+        logger.warning(f'{NAME} exiftool failed: {e}')
         return None
 
 def scrape_with_ffprobe(file_path):
     try:
+        logger.debug(f"{NAME} ffprobe start")
         metadata = ffmpeg.probe(file_path)
+        logger.debug(f"{NAME} ffprobe done")
         streams_by_type = {}
         for stream in metadata.get('streams', []):
             stream_type = stream.get('codec_type', 'unknown')
@@ -1290,7 +1295,7 @@ def scrape_with_ffprobe(file_path):
     
 def scrape_with_libmediainfo(file_path):
     try:
-        logger.info(f"start mediainfo subprocess for {file_path}")
+        logger.debug(f"{NAME} mediainfo start")
         result = subprocess.run(
             ['mediainfo', '--Output=JSON', file_path],
             capture_output=True,
@@ -1298,6 +1303,7 @@ def scrape_with_libmediainfo(file_path):
             check=True,
             timeout=10
         )
+        logger.debug(f"{NAME} mediainfo done")
         metadata = json.loads(result.stdout)
         media = metadata.get('media', {})
         tracks_by_type = {}
@@ -1310,7 +1316,7 @@ def scrape_with_libmediainfo(file_path):
         metadata['media'] = media
         return metadata
     except Exception as e:
-        logger.warning(f'{NAME} libmediainfo failed "{file_path}": {e}')
+        logger.warning(f'{NAME} mediainfo failed: {e}')
         return None
     
 def scrape_with_os(file_path):
@@ -1338,24 +1344,29 @@ def scrape_with_os(file_path):
                         data = os.getxattr(file_path, attr_name)
                         scrape[f'xattr.{attr_name}'] = data.decode('utf-8', errors='ignore')
                     except Exception as e:
-                        logger.exception(f"Failed to read xattr {attr_name} from {file_path}: {e}")
+                        logger.exception(f"Failed to read xattr {attr_name}")
         except Exception as e:
-            logger.exception(f"Failed to read xattrs from {file_path}: {e}")
+            logger.exception(f"Failed to read xattrs")
                     
         return scrape
     except Exception as e:
-        logger.warning(f'{NAME} os stat failed "{file_path}": {e}')
+        logger.warning(f'{NAME} os stat failed: {e}')
         return None
 
 def scrape_with_tika(file_path):
     try:
+        logger.debug(f"{NAME} tika start")
         parsed = parser.from_file(file_path, requestOptions={'timeout': 60})
+        logger.debug(f"{NAME} tika done")
         metadata = parsed["metadata"]
         if parsed["content"]:
             metadata['X-TIKA:content'] = parsed["content"]
         return metadata
     except ReadTimeout as e:
-        logger.warning(f"{NAME} {file_path} tika failed: request timed out")
+        logger.warning(f"{NAME} tika failed: request timed out")
+        return None
+    except ReadTimeout as e:
+        logger.warning(f"{NAME} tika failed: request timed out")
         return None
     except (RequestException, HTTPError) as e:
         raise e
@@ -1363,7 +1374,7 @@ def scrape_with_tika(file_path):
         cause = e
         if e.__cause__:
             cause = e.__cause__
-        logger.warning(f"{NAME} {file_path} tika failed {type(e).__name__}: {cause}")
+        logger.warning(f"{NAME} tika failed {type(e).__name__}: {cause}")
         return None
     
 def scrape_file_path(file_path):
@@ -1407,7 +1418,6 @@ def scrape_file_path(file_path):
 def main(file_path, document, doc_db_path, mtime, _logger):
     global logger
     logger = _logger
-    logger.info(f'{NAME} start {file_path}')
 
     version_path = doc_db_path / f"{NAME}.json"
     metadata_path = doc_db_path / "metadata.json"
@@ -1416,26 +1426,14 @@ def main(file_path, document, doc_db_path, mtime, _logger):
     metadata = {}
     metadata["fs"] = scrape_with_os(file_path)
     metadata["filepath"] = scrape_file_path(file_path)
-    if document["type"] in EXIFTOOL_MIMES:
-        logger.info(f"start exiftool")
-        metadata["exiftool"] = scrape_with_exiftool(file_path)
-        logger.info(f"end exiftool")
-        logger.debug('added exiftool scraping task')
-    if document["type"] in FFPROBE_LIBMEDIA_MIMES:
-        logger.info(f"start ffprobe")
-        metadata["ffprobe"] = scrape_with_ffprobe(file_path)
-        logger.info(f"end ffprobe")
-        logger.info(f"start libmediainfo")
-        metadata["libmediainfo"] = scrape_with_libmediainfo(file_path)
-        logger.info(f"end libmediainfo")
-        logger.debug('added ffprobe and libmediainfo scraping tasks')
-    if document["type"] in TIKA_SUPPORTED_MIMES:
-        logger.info(f"start tika")
-        metadata["tika"] = scrape_with_tika(file_path)
-        logger.info(f"end tika")
-        logger.debug('added tika scraping task')
     
-    logger.debug(f'scraping results collected: {metadata.keys()}')
+    if document["type"] in EXIFTOOL_MIMES:
+        metadata["exiftool"] = scrape_with_exiftool(file_path)
+    if document["type"] in FFPROBE_LIBMEDIA_MIMES:
+        metadata["ffprobe"] = scrape_with_ffprobe(file_path)
+        metadata["libmediainfo"] = scrape_with_libmediainfo(file_path)
+    if document["type"] in TIKA_SUPPORTED_MIMES:
+        metadata["tika"] = scrape_with_tika(file_path)
 
     if document["type"] in VIDEO_MIME_TYPES:
         desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_VIDEO)
@@ -1446,12 +1444,12 @@ def main(file_path, document, doc_db_path, mtime, _logger):
     else:
         desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
     
-    logger.debug(f'added fields to document "{desired_fields}"')
+    logger.debug(f'add fields: "{desired_fields}"')
     
     if version_path.exists():
         with open(version_path, 'r') as file:
             version_info = json.load(file)
-        logger.debug(f'nulling old fields for {file_path}')
+        logger.debug(f'nulling old fields')
         if "added_fields" in version_info:
             for field in version_info["added_fields"]:
                 document[field] = None
@@ -1467,17 +1465,16 @@ def main(file_path, document, doc_db_path, mtime, _logger):
             "file_path": file_path,
             "added_fields": added_fields
         }, file, indent=4, separators=(", ", ": "))
-    logger.debug(f'updated version.json at {version_path} with added fields: {added_fields}')
+    logger.debug(f'write {version_path}: {added_fields}')
 
     with open(metadata_path, 'w') as file:
         json.dump(metadata, file, indent=4, separators=(", ", ": "))
-    logger.debug('wrote metadata to metadata.json')
+    logger.debug(f'write {metadata_path}')
     
     if "tika" in metadata and metadata["tika"] is not None and "X-TIKA:content" in metadata["tika"]:
         with open(txt_path, 'w') as file:
             file.write(metadata["tika"]["X-TIKA:content"])
-        logger.debug('wrote plain text to plain_text.txt')
+        logger.debug(f'write {txt_path}')
 
-    logger.info(f'{NAME} done')
     return document
 

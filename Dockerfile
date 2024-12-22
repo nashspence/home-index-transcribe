@@ -1,4 +1,6 @@
-FROM pytorch-local:latest
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     attr \
@@ -19,7 +21,6 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 RUN pip install \
-    Pillow \
     easyocr \
     ffmpeg-python \
     git+https://github.com/m-bain/whisperx.git \
@@ -27,6 +28,7 @@ RUN pip install \
     meilisearch_python_sdk \
     numpy \
     pdf2image \
+    pillow \
     pyexiftool \
     pyinotify \
     python-magic \
@@ -35,10 +37,5 @@ RUN pip install \
     wand \
     xxhash
 
-COPY main.py .
-COPY shared.py .
-COPY inotify_module.py .
-COPY process_tasks_module.py .
-COPY modules ./modules/
-
+COPY src .
 ENTRYPOINT ["python3", "/app/main.py"]

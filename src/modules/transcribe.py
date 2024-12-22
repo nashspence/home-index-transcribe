@@ -1,13 +1,11 @@
-import collections
-import colorsys
-import json
 import logging
-import re
 import warnings
-import whisperx
 
-from datetime import datetime, timedelta, timezone
-from transcribe_meta import NAME, VERSION
+def warning_to_log(message, category, filename, lineno, file=None, line=None):
+    logger1.warning('%s:%s: %s: %s', filename, lineno, category.__name__, message)
+
+warnings.showwarning = warning_to_log
+warnings.filterwarnings("ignore", category=UserWarning)
 
 logger = logging
 
@@ -17,12 +15,6 @@ file_handler = logging.FileHandler(f"./data/logs/pytorch_user_warnings.log")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger1.addHandler(file_handler)
 logger1.propagate = False
-
-def warning_to_log(message, category, filename, lineno, file=None, line=None):
-    logger1.warning('%s:%s: %s: %s', filename, lineno, category.__name__, message)
-
-warnings.showwarning = warning_to_log
-warnings.filterwarnings("ignore", category=UserWarning)
 
 logger2 = logging.getLogger('matplotlib.font_manager')
 logger2.setLevel(logging.WARNING)
@@ -51,6 +43,19 @@ file_handler = logging.FileHandler(f"./data/logs/torch.log")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger5.addHandler(file_handler)
 logger5.propagate = False
+
+import collections
+import colorsys
+import json
+import re
+import whisperx
+import pyannote.audio
+import numpy
+import torch
+import torchaudio
+
+from datetime import datetime, timedelta, timezone
+from transcribe_meta import NAME, VERSION
 
 def generate_ass_subtitles(data, timestamp, offset_seconds, precision):
     def format_datetime(segment_datetime, precision):
@@ -219,7 +224,7 @@ threads = 16
 num_workers=None # increasing num_workers breaks whisperX model.transcribe
 
 model = whisperx.load_model("medium", device, compute_type=compute_type, language=language, threads=threads, download_root="/app/data/pytorch")
-model_a, metadata = whisperx.load_align_model(language_code=language)
+model_a, metadata = whisperx.load_align_model(language, device)
 align_model = model_a
 align_metadata = metadata
 diarize_model = whisperx.DiarizationPipeline(use_auth_token="REMOVED", device=device)
@@ -250,10 +255,9 @@ def main(file_path, document, doc_db_path, mtime, _logger):
     segments = result.get("segments", [])
     
     if segments:    
-        plain_text = " ".join([segment["text"].strip() for segment in result["segments"]]).strip()
-        plain_text = " ".join(plain_text.split())
-        transcribed_audio = re.sub(r'\s{2,}', ' ', re.sub(r'[^\w\s]+|\s{2,}', ' ', str(plain_text))).strip().lower()         
+        transcribed_audio = " ".join([segment["text"] for segment in result["segments"]])     
         document["transcribed_audio"] = transcribed_audio
+        logger.info(f'{NAME} {file_path}: {transcribed_audio}')
         
         with open(transcription_path, 'w') as file:
             json.dump(result, file, indent=4)

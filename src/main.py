@@ -127,11 +127,12 @@ async def add_or_update_document(doc):
 
     if doc:
         try:
+            logging.debug(f'index.update_documents "{doc["paths"][0]}" start')
             await index.update_documents([doc])
+            logging.debug(f'index.update_documents "{doc["paths"][0]}" done')
         except Exception:
-            logging.exception(f'meili index.update_documents failed for arg "{[doc]}"')
+            logging.exception(f'index.update_documents "{doc["paths"][0]}" failed: "{[doc]}"')
             raise
-
 
 async def add_or_update_documents(docs):
     if not index:
@@ -391,8 +392,9 @@ async def augment_documents(module):
             cancel_event = asyncio.Event()
 
             async def document_update_handler():
-                async for pdoc, cdoc in process_tasks(module, file_list, cancel_event):
+                async for pdoc, cdoc, fp in process_tasks(module, file_list, cancel_event):
                     try:
+                        logging.info(f'{module.NAME} "{fp}" commit update')
                         document = handle_document_changed(pdoc, cdoc)
                         await add_or_update_document(document)
                     except Exception as e:
@@ -409,7 +411,7 @@ async def augment_documents(module):
                 logging.debug(f"{module.NAME} up-to-date")
                 return False
             except asyncio.TimeoutError:
-                logging.debug(
+                logging.info(
                     f"{module.NAME} ask cancel after in-progress files are complete"
                 )
                 cancel_event.set()
@@ -420,7 +422,7 @@ async def augment_documents(module):
     return True
 
 async def begin_indexing():
-    await sync_documents()
+    # await sync_documents()
     logging.info(f"run modules")
     log_up_to_date = True
     while True:
