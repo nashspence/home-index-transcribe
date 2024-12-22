@@ -13,10 +13,10 @@ services:
     image: getmeili/meilisearch:latest
     restart: unless-stopped
     volumes:
-      - /home/ns/services/meilisearch/volumes/data:/meili_data
-  meilisearch-indexer:
+      - /home/ns/services/home-index/volumes/meili_data:/meili_data
+  home-index:
     build: .
-    container_name: meilisearch-indexer
+    container_name: home-index
     depends_on:
       - grafana-promtail
       - meilisearch
@@ -44,6 +44,6 @@ services:
         soft: 67108864
         hard: 67108864
     volumes:
-      - /home/ns/services/meilisearch/volumes/indexer:/app/data
+      - /home/ns/services/home-index/volumes/home-index:/app/data
       - /home/ns/shared:/data
-      - /home/ns/services/meilisearch/volumes/indexer/pytorch:/root/.cache/torch/
+      - /home/ns/services/home-index/volumes/home-index/pytorch:/root/.cache/torch/

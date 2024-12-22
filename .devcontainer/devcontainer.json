@@ -1,5 +1,5 @@
 {
 	"dockerComposeFile": "docker-compose.yml",
-	"service": "meili-file-index-devcontainer",
+	"service": "home-index-devcontainer",
 	"workspaceFolder": "/workspace"
 }

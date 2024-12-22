@@ -17,17 +17,4 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Ensure Docker group exists
-RUN groupadd -g 999 docker || true
-
-# Allow non-root user to access Docker (optional)
-# Replace `devcontainer` with your username if different
-RUN usermod -aG docker devcontainer
-
-# Set up entrypoint script
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-ENTRYPOINT ["docker-entrypoint.sh"]
-
 CMD ["bash"]
