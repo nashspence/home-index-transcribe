@@ -14,7 +14,7 @@ services:
     tty: true
     volumes:
       - ./:/workspace
-      - /home/ns/.ssh:/home/vscode/.ssh
+      - /home/ns/.ssh:/home/vscode/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock
   meilisearch:
     container_name: home-index-devcontainer-meilisearch
