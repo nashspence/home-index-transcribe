@@ -227,7 +227,7 @@ model = whisperx.load_model("medium", device, compute_type=compute_type, languag
 model_a, metadata = whisperx.load_align_model(language, device)
 align_model = model_a
 align_metadata = metadata
-diarize_model = whisperx.DiarizationPipeline(use_auth_token="REMOVED", device=device)
+diarize_model = whisperx.DiarizationPipeline(use_auth_token=os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN"), device=device)
 
 def main(file_path, document, doc_db_path, mtime, _logger):
     global logger
