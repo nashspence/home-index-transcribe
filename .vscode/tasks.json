@@ -7,9 +7,18 @@
             "command": "bash",
             "args": [
                 "-c",
-                "docker-compose down && WAIT_FOR_DEBUG_CLIENT=True docker-compose up -d && sleep 5"
+                "docker-compose down && docker-compose build home-index && WAIT_FOR_DEBUG_CLIENT=True docker-compose up -d && sleep 3"
             ],
             "problemMatcher": []
+        },
+        {
+            "label": "Stop Docker Compose",
+            "type": "shell",
+            "command": "docker-compose down",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always"
+            }
         }
     ]
 }

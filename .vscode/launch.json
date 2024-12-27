@@ -15,7 +15,8 @@
                     "remoteRoot": "/app"
                 }
             ],
-            "preLaunchTask": "Restart Docker Container"
+            "preLaunchTask": "Restart Docker Container",
+            "postDebugTask": "Stop Docker Compose"
         }
     ]
 }
