@@ -2,3 +2,4 @@
 bind-mounts/
 docker-compose.override*.yml
 docker-data
+venv

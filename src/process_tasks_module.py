@@ -66,9 +66,12 @@ def module_initializer(module):
         sys.path = original_sys_path
 
 
-def process_task(args):
+def process_task(args, cancel_event):
     fp, doc, spath, mtime = args
     try:
+        if cancel_event.is_set():
+            logging.debug(f'{module_name} "{fp}" task canceled before execution')
+            return doc, None, {"cancelled": 1}, fp
         logging.info(f'{module_name} "{fp}" run task on process from pool')
         with setup_logger(doc["id"], fp, spath / "log.txt") as _logger:
             result = worker.main(fp, doc, spath, mtime, _logger)
@@ -93,7 +96,7 @@ async def process_tasks(module, arg_list, cancel_event):
         for args in arg_list:
             fp, doc, spath, mtime = args
             logging.debug(f'{module.NAME} "{fp}" start')
-            tasks.append(loop.run_in_executor(executor, process_task, args))
+            tasks.append(loop.run_in_executor(executor, process_task, args, cancel_event))
         stats = {"success": 0, "failure": 0, "cancelled": 0}
         is_cancelled = False
         for future in asyncio.as_completed(tasks):
@@ -104,21 +107,14 @@ async def process_tasks(module, arg_list, cancel_event):
                     stats[key] += stat.get(key, 0)
                 if cdoc:
                     yield pdoc, cdoc, fp
-                if cancel_event.is_set():
-                    logging.info(
-                        f"{module.NAME} finish pending tasks, then shutdown..."
-                    )
+                if cancel_event.is_set() and not is_cancelled:
+                    logging.info(f"{module.NAME} tasks are being shut down...")
+                    executor.shutdown(wait=False, cancel_futures=True)
                     is_cancelled = True
-                    break
+            except asyncio.CancelledError:
+                stats["cancelled"] += 1
             except Exception:
                 stats["failure"] += 1
-        if is_cancelled:
-            for task in tasks:
-                task.cancel()
-            try:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception:
-                stats["cancelled"] += 1
     finally:
         executor.shutdown()
     logging.info("------------------------------------------")

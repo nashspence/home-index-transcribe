@@ -20,23 +20,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-RUN pip install \
-    debugpy \
-    easyocr \
-    ffmpeg-python \
-    git+https://github.com/m-bain/whisperx.git \
-    jmespath \
-    meilisearch_python_sdk \
-    numpy \
-    pdf2image \
-    pillow \
-    pyexiftool \
-    pyinotify \
-    python-magic \
-    rawpy \
-    tika \
-    wand \
-    xxhash
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
 COPY src .
 ENTRYPOINT ["python3", "/app/main.py"]
