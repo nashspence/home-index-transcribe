@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 RUN pip install \
+    debugpy \
     easyocr \
     ffmpeg-python \
     git+https://github.com/m-bain/whisperx.git \

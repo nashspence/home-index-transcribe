@@ -1,7 +1,14 @@
 ---
+networks:
+  home-index-net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.34.0.0/24
+
 services:
   meilisearch:
-    container_name: home-index-devcontainer-meilisearch
+    container_name: meilisearch
     environment:
       - MEILI_LOG_LEVEL=debug
       - MEILI_NO_ANALYTICS=true
@@ -12,9 +19,13 @@ services:
     restart: unless-stopped
     volumes:
       - ./bind-mounts/meili_data:/meili_data
+    networks:
+      home-index-net:
+        ipv4_address: 172.34.0.10
+
   tika:
     command: ["--config", "/config/tika-config.xml"]
-    container_name: home-index-devcontainer-tika
+    container_name: tika
     environment:
       - TZ=America/Los_Angeles
     expose:
@@ -23,12 +34,16 @@ services:
     restart: unless-stopped
     volumes:
       - ./bind-mounts/tika:/config
-      - /home/ns/shared:/data
-  app:
+      - /home/ns/shared:/data:ro
+    networks:
+      home-index-net:
+        ipv4_address: 172.34.0.11
+
+  home-index:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: home-index-devcontainer-app
+    container_name: home-index
     depends_on:
       - meilisearch
       - tika
@@ -41,10 +56,13 @@ services:
               capabilities: [gpu]
     environment:
       - DOMAIN=private.0819870.xyz
-      - MEILISEARCH_HOST=http://meilisearch:7700
+      - MEILISEARCH_HOST=http://172.34.0.10:7700
       - NVIDIA_VISIBLE_DEVICES=all
-      - TIKA_SERVER_ENDPOINT=http://tika:9998
+      - TIKA_SERVER_ENDPOINT=http://172.34.0.11:9998
       - TZ=America/Los_Angeles
+      - WAIT_FOR_DEBUG_CLIENT
+    ports:
+      - '5678:5678' # debugpy
     ipc: host
     restart: unless-stopped
     ulimits:
@@ -58,3 +76,6 @@ services:
       - ./bind-mounts/home-index:/app/data
       - /home/ns/shared:/data
       - ./bind-mounts/home-index/pytorch:/root/.cache/torch/
+    networks:
+      home-index-net:
+        ipv4_address: 172.34.0.12

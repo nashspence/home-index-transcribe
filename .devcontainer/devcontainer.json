@@ -2,13 +2,17 @@
 	"name": "home-index",
 	"dockerComposeFile": "./docker-compose.yml",
 	"service": "devcontainer",
+	"postStartCommand": "/usr/local/bin/start-docker.sh",
 	"workspaceFolder": "/workspace",
 	"customizations": {
 		"vscode": {
 			"extensions": [
 				"ms-azuretools.vscode-docker",
 				"ms-python.black-formatter",
-				"KevinRose.vsc-python-indent"
+				"KevinRose.vsc-python-indent",
+				"ms-python.vscode-pylance",
+				"ms-python.python",
+				"ms-python.debugpy"
 			]
 		}
 	}

@@ -1,18 +1,29 @@
----
 services:
   devcontainer:
     build:
       context: .
       dockerfile: Dockerfile.devcontainer
-    command: ["bash"]
+    command: ["/bin/sh"]
     container_name: home-index-devcontainer
-    environment:
-      - DOCKER_HOST=unix:///var/run/docker.sock
-    group_add:
-      - 111
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    privileged: true
     stdin_open: true
     tty: true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
     volumes:
       - ../:/workspace
+      - ../docker-data:/var/lib/docker
       - /home/ns/.ssh:/home/vscode/.ssh:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/ns/shared:/mnt/shared:ro
