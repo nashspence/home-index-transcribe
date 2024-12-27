@@ -9,3 +9,4 @@ python -m venv venv
 /workspace/venv/bin/pip install --upgrade pip
 PATH="/workspace/venv/bin:$PATH"
 /workspace/venv/bin/pip install -r requirements.txt
+source venv/bin/activate
