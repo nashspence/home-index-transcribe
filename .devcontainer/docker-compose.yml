@@ -25,5 +25,5 @@ services:
     volumes:
       - ../:/workspace
       - ../docker-data:/var/lib/docker
-      - /home/ns/.ssh:/home/vscode/.ssh:ro
+      - /home/ns/.ssh:/home/ns/.ssh:ro
       - /home/ns/shared:/mnt/shared:ro

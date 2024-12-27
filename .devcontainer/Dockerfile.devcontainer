@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-transport-https \
     sed \
     coreutils \
-    sudo
+    sudo \
+    openssh-client
 
 # Add repository for older libraries and install libtinfo5 or libncurses5
 RUN apt-get update && \
@@ -43,5 +44,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
     ln -sf /usr/bin/pip3 /usr/bin/pip
+
+COPY poststart.sh /usr/local/bin/poststart.sh
+RUN chmod +x /usr/local/bin/poststart.sh
 
 CMD ["bash"]
