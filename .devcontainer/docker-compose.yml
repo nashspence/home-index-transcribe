@@ -12,6 +12,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    hostname: home-index-devcontainer
     privileged: true
     stdin_open: true
     tty: true
