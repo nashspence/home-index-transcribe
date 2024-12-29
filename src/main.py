@@ -550,12 +550,12 @@ async def sync_documents():
 # region "run modules"
 
 
-def path_from_meili_doc(document):
-    return path_from_relative_path(document["paths"][0])
+def file_relpath_from_meili_doc(document):
+    return Path(document["paths"][0])
 
 
-def metadata_dir_path_from_doc(name, document):
-    return Path(METADATA_DIRECTORY) / document["id"] / name
+def metadata_dir_relpath_from_doc(name, document):
+    return Path(f"{document["id"]}/{name}")
 
 
 def update_document_status(name, document):
@@ -568,10 +568,10 @@ def update_document_status(name, document):
     document["is_archived"] = is_archived
     status = "idle"
 
-    path = path_from_meili_doc(document)
-    metadata_dir_path = metadata_dir_path_from_doc(name, document)
+    file_relpath = file_relpath_from_meili_doc(document)
+    metadata_dir_relpath = metadata_dir_relpath_from_doc(name, document)
     for name, proxy in modules:
-        if proxy.check(path, document, metadata_dir_path):
+        if proxy.check(file_relpath, document, metadata_dir_relpath):
             status = name
             break
 
@@ -594,10 +594,10 @@ async def run_module(name, proxy):
                     if elapsed_time > ALLOWED_TIME_PER_MODULE:
                         logging.debug(f"{name} exceeded configured allowed time")
                         return True
-                    path = path_from_meili_doc(document)
-                    metadata_dir_path = metadata_dir_path_from_doc(name, document)
-                    proxy.run(path, document, metadata_dir_path)
-                    logging.info(f'{name} "{path}" commit update')
+                    file_relpath = file_relpath_from_meili_doc(document)
+                    metadata_dir_relpath = metadata_dir_relpath_from_doc(name, document)
+                    proxy.run(file_relpath, document, metadata_dir_relpath)
+                    logging.info(f'{name} "{file_relpath}" commit update')
                     document = update_document_status(name, document)
                     await add_or_update_document(document)
                 except Exception as e:

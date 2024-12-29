@@ -11,7 +11,7 @@ import os
 import torch
 import gc
 from datetime import datetime, timedelta, timezone
-from ..module_base import ModuleBase, log_to_file_and_stdout
+from ..run_server import run_server
 from pathlib import Path
 
 
@@ -191,8 +191,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # region "config"
 
 
+VERSION = 1
 NAME = os.environ.get("NAME", "transcribe")
-VERSION = os.environ.get("VERSION", 1)
 DEVICE = os.environ.get("DEVICE", "cuda")
 BATCH_SIZE = os.environ.get("BATCH_SIZE", 1)  # reduce if low on GPU mem
 
@@ -250,128 +250,134 @@ SUPPORTED_MIME_TYPES = {
 
 # endregion
 
+# region "hello"
 
-class TranscribeModule(ModuleBase):
-    # region "hello"
 
-    def hello(self):
-        return {
-            "name": NAME,
-            "filterable_attributes": ["transcribed_audio"],
-            "sortable_attributes": [],
-        }
+def hello():
+    return {
+        "name": NAME,
+        "filterable_attributes": [f"{NAME}.text"],
+        "sortable_attributes": [],
+    }
 
-    # endregion
-    # region "load/unload"
 
-    def load(self):
-        self.model = whisperx.load_model(
-            WHISPER_MODEL,
-            DEVICE,
-            compute_type=COMPUTE_TYPE,
-            language=LANGUAGE,
-            threads=THREADS,
-            download_root=PYTORCH_DOWNLOAD_ROOT,
+# endregion
+# region "load/unload"
+
+
+model = None
+align_model = None
+align_metadata = None
+diarize_model = None
+
+
+def load():
+    global model, align_model, align_metadata, diarize_model
+
+    model = whisperx.load_model(
+        WHISPER_MODEL,
+        DEVICE,
+        compute_type=COMPUTE_TYPE,
+        language=LANGUAGE,
+        threads=THREADS,
+        download_root=PYTORCH_DOWNLOAD_ROOT,
+    )
+
+    model_a, metadata = whisperx.load_align_model(LANGUAGE, DEVICE)
+    align_model = model_a
+    align_metadata = metadata
+
+    diarize_model = whisperx.DiarizationPipeline(
+        use_auth_token=PYANNOTE_DIARIZATION_AUTH_TOKEN,
+        device=DEVICE,
+    )
+
+
+def unload():
+    global model, align_model, align_metadata, diarize_model
+    del model
+    del align_model
+    del align_metadata
+    del diarize_model
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+# endregion
+# region "check/run"
+
+
+def check(file_path, document, metadata_dir_path):
+    if not document["type"] in SUPPORTED_MIME_TYPES:
+        return False
+
+    if not "creation_date" in document:
+        return False
+
+    version_path = metadata_dir_path / "version.json"
+    version = None
+    if version_path.exists():
+        with open(version_path, "r") as file:
+            version = json.load(file)
+    if version and version.get("version") == VERSION:
+        return False
+
+    return True
+
+
+def run(file_path, document, metadata_dir_path):
+    global model, align_model, align_metadata, diarize_model
+    logging.info(f"start {file_path}")
+
+    version_path = metadata_dir_path / "version.json"
+    transcription_path = metadata_dir_path / "transcription.json"
+    subtitle_path = metadata_dir_path / f"{Path(file_path).stem}.ass"
+
+    audio = whisperx.load_audio(file_path)
+
+    result = model.transcribe(
+        audio, language=LANGUAGE, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS
+    )
+
+    result = whisperx.align(
+        result["segments"], align_model, align_metadata, audio, DEVICE
+    )
+
+    diarize_segments = diarize_model(audio)
+    result = whisperx.assign_word_speakers(diarize_segments, result)
+
+    if version_path.exists():
+        document[NAME] = None
+
+    segments = result.get("segments", [])
+
+    if segments:
+        transcribed_audio = " ".join(
+            [segment["text"] for segment in result["segments"]]
         )
 
-        model_a, metadata = whisperx.load_align_model(LANGUAGE, DEVICE)
-        self.align_model = model_a
-        self.align_metadata = metadata
+        document[NAME] = {"text": transcribed_audio}
+        logging.info(f"{file_path}: {transcribed_audio}")
 
-        self.diarize_model = whisperx.DiarizationPipeline(
-            use_auth_token=PYANNOTE_DIARIZATION_AUTH_TOKEN,
-            device=DEVICE,
-        )
+        with open(transcription_path, "w") as file:
+            json.dump(result, file, indent=4)
 
-    def unload(self):
-        del self.model
-        del self.align_model
-        del self.align_metadata
-        del self.diarize_model
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # endregion
-    # region "check/run"
-
-    def check(self, file_path, document, metadata_dir_path):
-        if not document["type"] in SUPPORTED_MIME_TYPES:
-            return False
-        if not "creation_date" in document:
-            return False
-        version_path = metadata_dir_path / "version.json"
-        version = None
-        if version_path.exists():
-            with open(version_path, "r") as file:
-                version = json.load(file)
-        if version and version.get("version") == VERSION:
-            return False
-        return True
-
-    def run(self, path, document, metadata_dir_path):
-        with log_to_file_and_stdout(metadata_dir_path / "log.txt"):
-            logging.info(f"start {path}")
-
-            version_path = metadata_dir_path / "version.json"
-            transcription_path = metadata_dir_path / "transcription.json"
-            subtitle_path = metadata_dir_path / f"{Path(path).stem}.ass"
-
-            audio = whisperx.load_audio(path)
-            result = self.model.transcribe(
-                audio, language=LANGUAGE, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS
+        with open(subtitle_path, "w") as file:
+            creation_date = document["creation_date"]
+            offset_seconds = document.get("creation_date_offset_seconds", 0)
+            precision = document.get("creation_date_precision", 0)
+            file.write(
+                generate_ass_subtitles(result, creation_date, offset_seconds, precision)
             )
-            result = whisperx.align(
-                result["segments"],
-                self.align_model,
-                self.align_metadata,
-                audio,
-                DEVICE,
-                return_char_alignments=False,
-            )
-            diarize_segments = self.diarize_model(audio)
-            result = whisperx.assign_word_speakers(diarize_segments, result)
 
-            if version_path.exists():
-                with open(version_path, "r") as file:
-                    version_info = json.load(file)
-                logging.debug(f"nulling old fields")
-                if "added_fields" in version_info:
-                    for field in version_info["added_fields"]:
-                        document[field] = None
+    with open(version_path, "w") as file:
+        json.dump({"version": VERSION}, file, indent=4)
 
-            segments = result.get("segments", [])
+    logging.info("done")
+    return document
 
-            if segments:
-                transcribed_audio = " ".join(
-                    [segment["text"] for segment in result["segments"]]
-                )
-                document["transcribed_audio"] = transcribed_audio
-                logging.info(f"{path}: {transcribed_audio}")
 
-                with open(transcription_path, "w") as file:
-                    json.dump(result, file, indent=4)
-
-                with open(subtitle_path, "w") as file:
-                    offset_seconds = document.get("creation_date_offset_seconds", 0)
-                    precision = document.get("creation_date_precision", 0)
-                    file.write(
-                        generate_ass_subtitles(
-                            result, document["creation_date"], offset_seconds, precision
-                        )
-                    )
-
-            with open(version_path, "w") as file:
-                json.dump(
-                    {"version": VERSION, "added_fields": ["transcribed_audio"]},
-                    file,
-                    indent=4,
-                )
-
-            logging.info(f"done")
-            return document
-
-    # endregion
-
+# endregion
 
 if __name__ == "__main__":
-    module = TranscribeModule(host="localhost", port=9000)
+    run_server(hello, check, run, load, unload)
