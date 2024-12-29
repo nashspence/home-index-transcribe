@@ -1,65 +1,22 @@
+# region "import"
+
+
 import logging
-import warnings
-
-
-def warning_to_log(message, category, filename, lineno, file=None, line=None):
-    logger1.warning("%s:%s: %s: %s", filename, lineno, category.__name__, message)
-
-
-warnings.showwarning = warning_to_log
-warnings.filterwarnings("ignore", category=UserWarning)
-
-logger = logging
-
-logger1 = logging.getLogger("pytorch_user_warnings")
-logger1.setLevel(logging.WARNING)
-file_handler = logging.FileHandler(f"./data/logs/pytorch_user_warnings.log")
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger1.addHandler(file_handler)
-logger1.propagate = False
-
-logger2 = logging.getLogger("matplotlib.font_manager")
-logger2.setLevel(logging.WARNING)
-file_handler = logging.FileHandler(f"./data/logs/matplotlib.font_manager.log")
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger2.addHandler(file_handler)
-logger2.propagate = False
-
-logger3 = logging.getLogger("speechbrain.utils.quirks")
-logger3.setLevel(logging.WARNING)
-file_handler = logging.FileHandler(f"./data/logs/speechbrain.utils.quirks.log")
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger3.addHandler(file_handler)
-logger3.propagate = False
-
-logger4 = logging.getLogger("pytorch_lightning.utilities.migration.utils")
-logger4.setLevel(logging.WARNING)
-file_handler = logging.FileHandler(
-    f"./data/logs/pytorch_lightning.utilities.migration.utils.log"
-)
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger4.addHandler(file_handler)
-logger4.propagate = False
-
-logger5 = logging.getLogger("torch")
-logger5.setLevel(logging.WARNING)
-file_handler = logging.FileHandler(f"./data/logs/torch.log")
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger5.addHandler(file_handler)
-logger5.propagate = False
-
 import collections
 import colorsys
 import json
 import re
 import whisperx
-import pyannote.audio
-import numpy
+import os
 import torch
-import torchaudio
-
+import gc
 from datetime import datetime, timedelta, timezone
-from transcribe_meta import NAME, VERSION
+from ..module_base import ModuleBase, log_to_file_and_stdout
+from pathlib import Path
+
+
+# endregion
+# region "ass subtitles"
 
 
 def generate_ass_subtitles(data, timestamp, offset_seconds, precision):
@@ -230,86 +187,191 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-device = "cuda"
-batch_size = 1  # reduce if low on GPU mem
-compute_type = "int8"  # change to "int8" if low on GPU mem (may reduce accuracy)
-language = "en"
-threads = 16
-num_workers = None  # increasing num_workers breaks whisperX model.transcribe
-
-model = whisperx.load_model(
-    "medium",
-    device,
-    compute_type=compute_type,
-    language=language,
-    threads=threads,
-    download_root="/app/data/pytorch",
-)
-model_a, metadata = whisperx.load_align_model(language, device)
-align_model = model_a
-align_metadata = metadata
-diarize_model = whisperx.DiarizationPipeline(
-    use_auth_token=os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN"), device=device
-)
+# endregion
+# region "config"
 
 
-def main(file_path, document, doc_db_path, mtime, _logger):
-    global logger
-    logger = _logger
-    logger.info(f"{NAME} start {file_path}")
+NAME = os.environ.get("NAME", "transcribe")
+VERSION = os.environ.get("VERSION", 1)
+DEVICE = os.environ.get("DEVICE", "cuda")
+BATCH_SIZE = os.environ.get("BATCH_SIZE", 1)  # reduce if low on GPU mem
 
-    version_path = doc_db_path / f"{NAME}.json"
-    transcription_path = doc_db_path / "transcription.json"
-    subtitle_path = doc_db_path / "subtitle.ass"
+COMPUTE_TYPE = os.environ.get(
+    "COMPUTE_TYPE", "int8"
+)  # change to "int8" if low on GPU mem (may reduce accuracy)
 
-    audio = whisperx.load_audio(file_path)
-    result = model.transcribe(
-        audio, language=language, batch_size=batch_size, num_workers=num_workers
-    )
-    result = whisperx.align(
-        result["segments"],
-        align_model,
-        align_metadata,
-        audio,
-        device,
-        return_char_alignments=False,
-    )
-    diarize_segments = diarize_model(audio)
-    result = whisperx.assign_word_speakers(diarize_segments, result)
+LANGUAGE = os.environ.get("LANGUAGE", "en")
+THREADS = os.environ.get("THREADS", 16)
+NUM_WORKERS = None  # increasing NUM_WORKERS breaks whisperX model.transcribe
+PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/app/data/pytorch")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
+PYANNOTE_DIARIZATION_AUTH_TOKEN = os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN")
+SUPPORTED_MIME_TYPES = {
+    "audio/aac",
+    "audio/flac",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/ogg",
+    "audio/wav",
+    "audio/webm",
+    "audio/x-wav",
+    "audio/x-m4a",
+    "audio/x-ms-wma",
+    "audio/x-ms-wax",
+    "audio/x-flac",
+    "audio/x-musepack",
+    "audio/x-opus",
+    "audio/x-vorbis",
+    "audio/x-alac",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/x-flv",
+    "video/x-m4v",
+    "video/x-mjpeg",
+    "video/quicktime",
+    "video/mp4",
+    "video/mpeg",
+    "video/webm",
+    "video/ogg",
+    "video/x-nut",
+    "video/x-matroska",
+    "application/x-mpegURL",
+    "application/ogg",
+    "application/vnd.apple.mpegurl",
+    "application/vnd.rn-realmedia",
+    "application/vnd.rn-realmedia-vbr",
+    "application/x-pn-realaudio",
+    "video/x-ms-asf",
+    "video/x-ms-wmv",
+    "video/3gpp",
+    "video/3gpp2",
+}
 
-    if version_path.exists():
-        with open(version_path, "r") as file:
-            version_info = json.load(file)
-        logger.debug(f"nulling old fields")
-        if "added_fields" in version_info:
-            for field in version_info["added_fields"]:
-                document[field] = None
 
-    segments = result.get("segments", [])
+# endregion
 
-    if segments:
-        transcribed_audio = " ".join(
-            [segment["text"] for segment in result["segments"]]
+
+class TranscribeModule(ModuleBase):
+    # region "hello"
+
+    def hello(self):
+        return {
+            "name": NAME,
+            "filterable_attributes": ["transcribed_audio"],
+            "sortable_attributes": [],
+        }
+
+    # endregion
+    # region "load/unload"
+
+    def load(self):
+        self.model = whisperx.load_model(
+            WHISPER_MODEL,
+            DEVICE,
+            compute_type=COMPUTE_TYPE,
+            language=LANGUAGE,
+            threads=THREADS,
+            download_root=PYTORCH_DOWNLOAD_ROOT,
         )
-        document["transcribed_audio"] = transcribed_audio
-        logger.info(f"{NAME} {file_path}: {transcribed_audio}")
 
-        with open(transcription_path, "w") as file:
-            json.dump(result, file, indent=4)
+        model_a, metadata = whisperx.load_align_model(LANGUAGE, DEVICE)
+        self.align_model = model_a
+        self.align_metadata = metadata
 
-        with open(subtitle_path, "w") as file:
-            offset_seconds = document.get("creation_date_offset_seconds", 0)
-            precision = document.get("creation_date_precision", 0)
-            file.write(
-                generate_ass_subtitles(
-                    result, document["creation_date"], offset_seconds, precision
-                )
+        self.diarize_model = whisperx.DiarizationPipeline(
+            use_auth_token=PYANNOTE_DIARIZATION_AUTH_TOKEN,
+            device=DEVICE,
+        )
+
+    def unload(self):
+        del self.model
+        del self.align_model
+        del self.align_metadata
+        del self.diarize_model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # endregion
+    # region "check/run"
+
+    def check(self, file_path, document, metadata_dir_path):
+        if not document["type"] in SUPPORTED_MIME_TYPES:
+            return False
+        if not "creation_date" in document:
+            return False
+        version_path = metadata_dir_path / "version.json"
+        version = None
+        if version_path.exists():
+            with open(version_path, "r") as file:
+                version = json.load(file)
+        if version and version.get("version") == VERSION:
+            return False
+        return True
+
+    def run(self, path, document, metadata_dir_path):
+        with log_to_file_and_stdout(metadata_dir_path / "log.txt"):
+            logging.info(f"start {path}")
+
+            version_path = metadata_dir_path / "version.json"
+            transcription_path = metadata_dir_path / "transcription.json"
+            subtitle_path = metadata_dir_path / f"{Path(path).stem}.ass"
+
+            audio = whisperx.load_audio(path)
+            result = self.model.transcribe(
+                audio, language=LANGUAGE, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS
             )
+            result = whisperx.align(
+                result["segments"],
+                self.align_model,
+                self.align_metadata,
+                audio,
+                DEVICE,
+                return_char_alignments=False,
+            )
+            diarize_segments = self.diarize_model(audio)
+            result = whisperx.assign_word_speakers(diarize_segments, result)
 
-    with open(version_path, "w") as file:
-        json.dump(
-            {"version": VERSION, "added_fields": ["transcribed_audio"]}, file, indent=4
-        )
+            if version_path.exists():
+                with open(version_path, "r") as file:
+                    version_info = json.load(file)
+                logging.debug(f"nulling old fields")
+                if "added_fields" in version_info:
+                    for field in version_info["added_fields"]:
+                        document[field] = None
 
-    logger.info(f"{NAME} done")
-    return document
+            segments = result.get("segments", [])
+
+            if segments:
+                transcribed_audio = " ".join(
+                    [segment["text"] for segment in result["segments"]]
+                )
+                document["transcribed_audio"] = transcribed_audio
+                logging.info(f"{path}: {transcribed_audio}")
+
+                with open(transcription_path, "w") as file:
+                    json.dump(result, file, indent=4)
+
+                with open(subtitle_path, "w") as file:
+                    offset_seconds = document.get("creation_date_offset_seconds", 0)
+                    precision = document.get("creation_date_precision", 0)
+                    file.write(
+                        generate_ass_subtitles(
+                            result, document["creation_date"], offset_seconds, precision
+                        )
+                    )
+
+            with open(version_path, "w") as file:
+                json.dump(
+                    {"version": VERSION, "added_fields": ["transcribed_audio"]},
+                    file,
+                    indent=4,
+                )
+
+            logging.info(f"done")
+            return document
+
+    # endregion
+
+
+if __name__ == "__main__":
+    module = TranscribeModule(host="localhost", port=9000)

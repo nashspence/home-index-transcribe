@@ -26,11 +26,9 @@ file_handler = logging.RotatingFileHandler(
     "./data/logs/indexer.log", maxBytes=5_000_000, backupCount=10
 )
 stream_handler = logging.StreamHandler()
-file_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
-)
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 stream_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
+    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 )
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
@@ -87,7 +85,7 @@ if not os.path.exists(METADATA_DIRECTORY):
 modules_file_path = "./data/modules_state.json"
 modules = {}
 module_values = []
-hellos = {}
+hellos = []
 modules_state_changed = False
 
 try:
@@ -102,9 +100,14 @@ try:
         domain, port = item.split(":")
         proxy = ServerProxy(f"http://{domain.strip()}:{port.strip()}/")
         hello = proxy.hello()
-        hellos[item] = hello
-        modules[item] = {"name": item, "proxy": proxy}
-        module_values.append(modules[item])
+        name = hello["name"]
+        hellos.append(hello)
+        if name in modules:
+            raise ValueError(
+                f"multiple modules found with name {name}, this must be unique"
+            )
+        modules[name] = {"name": name, "proxy": proxy}
+        module_values.append(modules[name])
 except ValueError:
     raise ValueError("MODULES format should be 'domain:port,domain:port,...'")
 
@@ -156,7 +159,7 @@ async def init_meili():
         "size",
         "status",
         "type",
-    ] + list(chain(*[hello.filterable_attributes for hello in hellos]))
+    ] + list(chain(*[hello["filterable_attributes"] for hello in hellos]))
 
     try:
         logging.debug(f"meili update index attrs")
@@ -170,7 +173,7 @@ async def init_meili():
                 "status",
                 "type",
             ]
-            + list(chain(*[hello.sortable_attributes for hello in hellos]))
+            + list(chain(*[hello["sortable_attributes"] for hello in hellos]))
         )
     except Exception:
         logging.exception(f"meili update index attrs failed")
@@ -547,12 +550,12 @@ async def sync_documents():
 # region "run modules"
 
 
-def path_from_meili_doc(doc):
-    return path_from_relative_path(doc["paths"][0])
+def path_from_meili_doc(document):
+    return path_from_relative_path(document["paths"][0])
 
 
-def metadata_dir_path_from_doc(doc):
-    return Path(METADATA_DIRECTORY) / doc["id"]
+def metadata_dir_path_from_doc(name, document):
+    return Path(METADATA_DIRECTORY) / document["id"] / name
 
 
 def update_document_status(name, document):
@@ -566,7 +569,7 @@ def update_document_status(name, document):
     status = "idle"
 
     path = path_from_meili_doc(document)
-    metadata_dir_path = metadata_dir_path_from_doc(document)
+    metadata_dir_path = metadata_dir_path_from_doc(name, document)
     for name, proxy in modules:
         if proxy.check(path, document, metadata_dir_path):
             status = name
@@ -592,7 +595,7 @@ async def run_module(name, proxy):
                         logging.debug(f"{name} exceeded configured allowed time")
                         return True
                     path = path_from_meili_doc(document)
-                    metadata_dir_path = metadata_dir_path_from_doc(document)
+                    metadata_dir_path = metadata_dir_path_from_doc(name, document)
                     proxy.run(path, document, metadata_dir_path)
                     logging.info(f'{name} "{path}" commit update')
                     document = update_document_status(name, document)
@@ -612,8 +615,8 @@ async def run_modules():
     logging.info(f"run modules")
     while True:
         run_again = False
-        for name, proxy in modules:
-            module_did_not_finish = await run_module(name, proxy)
+        for module in module_values:
+            module_did_not_finish = await run_module(module["name"], module["proxy"])
             run_again = run_again or module_did_not_finish
         if not run_again:
             await asyncio.sleep(RECHECK_TIME_AFTER_COMPLETE)
