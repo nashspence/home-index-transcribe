@@ -50,7 +50,6 @@ import xxhash
 from xmlrpc.client import ServerProxy
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from process_tasks_module import process_tasks
 from multiprocessing import Process
 from itertools import chain
 from meilisearch_python_sdk import AsyncClient
@@ -85,30 +84,38 @@ METADATA_DIRECTORY = os.environ.get("METADATA_DIRECTORY", "/data/metadata")
 if not os.path.exists(METADATA_DIRECTORY):
     os.makedirs(METADATA_DIRECTORY)
 
-MODULES = os.environ.get("MODULES", "")
-MODULES_CHANGED = False
-modules_file_path = "./data/modules"
-modules = []
+modules_file_path = "./data/modules_state.json"
+modules = {}
+module_values = []
+hellos = {}
+modules_state_changed = False
+
 try:
-    for item in MODULES.split(","):
-        domain, port = item.split(":")
-        modules.append(
-            {
-                "name": item,
-                "proxy": ServerProxy(f"http://{domain.strip()}:{port.strip()}/"),
-            }
-        )
-    existing_modules = ""
+    MODULES = os.environ.get("MODULES", "")
+    existing_data = {}
     if os.path.exists(modules_file_path):
         with open(modules_file_path, "r") as file:
-            existing_modules = file.read()
-    MODULES_CHANGED = MODULES != existing_modules
-    if MODULES_CHANGED:
-        os.makedirs(os.path.dirname(modules_file_path), exist_ok=True)
-        with open(modules_file_path, "w") as file:
-            file.write(MODULES)
+            existing_data = json.load(file)
+    existing_modules = existing_data.get("modules", "")
+    modules_state_changed = MODULES != existing_modules
+    for item in MODULES.split(","):
+        domain, port = item.split(":")
+        proxy = ServerProxy(f"http://{domain.strip()}:{port.strip()}/")
+        hello = proxy.hello()
+        hellos[item] = hello
+        modules[item] = {"name": item, "proxy": proxy}
+        module_values.append(modules[item])
 except ValueError:
     raise ValueError("MODULES format should be 'domain:port,domain:port,...'")
+
+
+initial_module_id = module_values[0]["name"] if module_values else "idle"
+
+
+def save_modules_state():
+    os.makedirs(os.path.dirname(modules_file_path), exist_ok=True)
+    with open(modules_file_path, "w") as file:
+        json.dump({"modules": MODULES}, file, indent=4)
 
 
 # endregion
@@ -142,8 +149,6 @@ async def init_meili():
             logging.exception(f"meili init failed")
             raise
 
-    hellos = [module["proxy"].hello() for module in modules]
-
     filterable_attributes = [
         "is_archived",
         "mtime",
@@ -151,7 +156,7 @@ async def init_meili():
         "size",
         "status",
         "type",
-    ] + list(chain(*[hello.filterable_field_names for hello in hellos]))
+    ] + list(chain(*[hello.filterable_attributes for hello in hellos]))
 
     try:
         logging.debug(f"meili update index attrs")
@@ -165,7 +170,7 @@ async def init_meili():
                 "status",
                 "type",
             ]
-            + list(chain(*[hello.sortable_field_names for hello in hellos]))
+            + list(chain(*[hello.sortable_attributes for hello in hellos]))
         )
     except Exception:
         logging.exception(f"meili update index attrs failed")
@@ -407,7 +412,7 @@ def process_file(file_path, index_dir, metadata_docs_by_id):
             "size": stat_info.st_size,
             "type": get_mime_type(file_path),
             "is_archived": is_in_archive_directory(file_path),
-            "status": modules[0]["name"] if modules else "idle",
+            "status": initial_module_id,
             "copies": 1,
         }
         # We return (doc_id, doc) so the main thread can persist + update dicts
@@ -454,8 +459,8 @@ def process_file(file_path, index_dir, metadata_docs_by_id):
             doc["type"] = new_type
             updated = True
 
-        if MODULES_CHANGED:
-            doc["status"] = modules[0]["name"] if modules else "idle"
+        if modules_state_changed:
+            doc["status"] = initial_module_id
 
         if updated:
             return (doc_id, doc)
@@ -534,6 +539,7 @@ async def sync_documents():
         await wait_for_meili_idle()
 
     total_docs_in_meili = await get_document_count()
+    save_modules_state()
     logging.info(f"Sync complete. MeiliSearch has {total_docs_in_meili} documents")
 
 
@@ -549,7 +555,7 @@ def metadata_dir_path_from_doc(doc):
     return Path(METADATA_DIRECTORY) / doc["id"]
 
 
-def handle_document_changed(document):
+def update_document_status(name, document):
     is_archived = False
 
     for relative_path in document["paths"]:
@@ -559,12 +565,10 @@ def handle_document_changed(document):
     document["is_archived"] = is_archived
     status = "idle"
 
+    path = path_from_meili_doc(document)
+    metadata_dir_path = metadata_dir_path_from_doc(document)
     for name, proxy in modules:
-        if proxy.check(
-            path_from_meili_doc(document),
-            document,
-            metadata_dir_path_from_doc(document),
-        ):
+        if proxy.check(path, document, metadata_dir_path):
             status = name
             break
 
@@ -582,17 +586,16 @@ async def run_module(name, proxy):
             logging.info(f"{name} started for {len(documents)} documents")
             start_time = time.monotonic()
             for document in documents:
-                elapsed_time = time.monotonic() - start_time
-                if elapsed_time > ALLOWED_TIME_PER_MODULE:
-                    return True
                 try:
-                    proxy.run(
-                        path_from_meili_doc(document),
-                        document,
-                        metadata_dir_path_from_doc(document),
-                    )
-                    logging.info(f'{name} "{file}" commit update')
-                    document = handle_document_changed(document)
+                    elapsed_time = time.monotonic() - start_time
+                    if elapsed_time > ALLOWED_TIME_PER_MODULE:
+                        logging.debug(f"{name} exceeded configured allowed time")
+                        return True
+                    path = path_from_meili_doc(document)
+                    metadata_dir_path = metadata_dir_path_from_doc(document)
+                    proxy.run(path, document, metadata_dir_path)
+                    logging.info(f'{name} "{path}" commit update')
+                    document = update_document_status(name, document)
                     await add_or_update_document(document)
                 except Exception as e:
                     logging.exception(
