@@ -1,17 +1,4 @@
 apscheduler
 debugpy
-easyocr
-ffmpeg-python
-git+https://github.com/m-bain/whisperx.git
-jmespath
 meilisearch-python-sdk
-numpy
-pdf2image
-pillow
-pyexiftool
-pyinotify
-python-magic
-rawpy
-tika
-wand
 xxhash

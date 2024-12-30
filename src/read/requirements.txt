@@ -1,3 +1,4 @@
+git+https://github.com/nashspence/home-index.git
 debugpy
 easyocr
 numpy

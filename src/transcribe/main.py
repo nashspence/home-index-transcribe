@@ -1,3 +1,19 @@
+# region "debugpy"
+
+
+import os
+import debugpy
+
+debugpy.listen(("0.0.0.0", 5678))
+
+if str(os.environ.get("WAIT_FOR_DEBUG_CLIENT", "false")).lower() == "true":
+    print("Waiting for debugger to attach...")
+    debugpy.wait_for_client()
+    print("Debugger attached.")
+    debugpy.breakpoint()
+
+
+# endregion
 # region "import"
 
 

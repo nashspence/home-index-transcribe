@@ -7,15 +7,12 @@ networks:
         - subnet: 172.34.0.0/24
 
 services:
-  home-index:
+  home-index-read-module:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: home-index
-    depends_on:
-      - meilisearch
+    container_name: home-index-read-module
     environment:
-      - MEILISEARCH_HOST=http://meilisearch:7700
       - TZ=America/Los_Angeles
       - WAIT_FOR_DEBUG_CLIENT
     ports:
@@ -23,11 +20,11 @@ services:
     restart: unless-stopped
     volumes:
       - ./bind-mounts/home-index:/app/data
-      - /home/ns/shared:/data
+      - /home/ns/shared:/files
       - ./bind-mounts/home-index/pytorch:/root/.cache/torch/
     networks:
       debug-net:
-        ipv4_address: 172.34.0.12
+        ipv4_address: 172.34.0.10
   meilisearch:
     container_name: meilisearch
     environment:
@@ -37,5 +34,24 @@ services:
     restart: unless-stopped
     volumes:
       - ./bind-mounts/meili_data:/meili_data
+    networks:
+      - debug-net
+  home-index:
+    build:
+      context: https://github.com/nashspence/home-index.git
+      dockerfile: Dockerfile
+    container_name: home-index
+    depends_on:
+      - meilisearch
+      - home-index-read-module
+    environment:
+      - MODULES=http://172.34.0.10:9000
+      - MEILISEARCH_HOST=http://172.34.0.11:7700
+      - TZ=America/Los_Angeles
+    restart: unless-stopped
+    volumes:
+      - ./bind-mounts/home-index:/app/data
+      - /home/ns/shared:/data
+      - ./bind-mounts/home-index/pytorch:/root/.cache/torch/
     networks:
       - debug-net

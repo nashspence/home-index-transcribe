@@ -1,2 +1,3 @@
 debugpy
+git+https://github.com/nashspence/home-index.git
 git+https://github.com/m-bain/whisperx.git

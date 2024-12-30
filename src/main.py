@@ -1,5 +1,6 @@
 # region "debugpy"
 
+
 import os
 import debugpy
 
@@ -11,6 +12,7 @@ if str(os.environ.get("WAIT_FOR_DEBUG_CLIENT", "false")).lower() == "true":
     print("Debugger attached.")
     debugpy.breakpoint()
 
+
 # endregion
 # region "logging"
 
@@ -20,10 +22,11 @@ if not os.path.exists("./data/logs"):
 import logging
 
 logging.basicConfig(level=logging.CRITICAL)
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 file_handler = logging.RotatingFileHandler(
-    "./data/logs/indexer.log", maxBytes=5_000_000, backupCount=10
+    "./data/logs/home-index-orchestrator.log", maxBytes=5_000_000, backupCount=10
 )
 stream_handler = logging.StreamHandler()
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -32,6 +35,19 @@ stream_handler.setFormatter(
 )
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
+
+synclog = logging.getLogger("home-index-sync")
+synclog.setLevel(logging.INFO)
+file_handler = logging.RotatingFileHandler(
+    "./data/logs/home-index-sync.log", maxBytes=5_000_000, backupCount=10
+)
+stream_handler = logging.StreamHandler()
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+stream_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+)
+synclog.addHandler(file_handler)
+synclog.addHandler(stream_handler)
 
 # endregion
 # region "import"
@@ -97,8 +113,7 @@ try:
     existing_modules = existing_data.get("modules", "")
     modules_state_changed = MODULES != existing_modules
     for item in MODULES.split(","):
-        domain, port = item.split(":")
-        proxy = ServerProxy(f"http://{domain.strip()}:{port.strip()}/")
+        proxy = ServerProxy(item.strip())
         hello = proxy.hello()
         name = hello["name"]
         hellos.append(hello)
@@ -109,7 +124,7 @@ try:
         modules[name] = {"name": name, "proxy": proxy}
         module_values.append(modules[name])
 except ValueError:
-    raise ValueError("MODULES format should be 'domain:port,domain:port,...'")
+    raise ValueError("MODULES format should be 'http://domain:port,http://domain:port,...'")
 
 
 initial_module_id = module_values[0]["name"] if module_values else "idle"
@@ -472,9 +487,10 @@ def process_file(file_path, index_dir, metadata_docs_by_id):
 
 
 async def sync_documents():
-    logging.info("Starting document sync")
+    synclog.info("Starting document sync")
 
     # Load metadata documents
+    synclog.info(f"Load metadata documents")
     metadata_docs_by_id = {}
     for entry in os.scandir(METADATA_DIRECTORY):
         if entry.is_dir():
@@ -483,10 +499,12 @@ async def sync_documents():
                 metadata_docs_by_id[entry.name] = doc
 
     # Fetch MeiliSearch documents
+    synclog.info(f"Fetch MeiliSearch documents")
     meili_docs = await get_all_documents()
     meili_docs_by_id = {d["id"]: d for d in meili_docs}
 
     # Identify documents to delete
+    synclog.info(f"Identify documents to delete")
     docs_to_delete_in_meili = {
         doc_id
         for doc_id, doc in metadata_docs_by_id.items()
@@ -498,12 +516,14 @@ async def sync_documents():
     }
 
     # Remove outdated metadata entries on disk
+    synclog.info(f"Remove outdated metadata entries on disk")
     for doc_id in docs_to_delete_in_meili:
         metadata_entry_path = os.path.join(METADATA_DIRECTORY, doc_id)
         if os.path.exists(metadata_entry_path):
             shutil.rmtree(metadata_entry_path)
 
     # Gather files from INDEX_DIRECTORY
+    synclog.info(f'Gather all files from "{INDEX_DIRECTORY}"')
     file_paths = []
     for root, _, files in os.walk(INDEX_DIRECTORY):
         # Skip if root is the METADATA_DIRECTORY
@@ -515,7 +535,8 @@ async def sync_documents():
     # Process files in parallel
     docs_to_add_or_update = {}
     # Use ThreadPoolExecutor or ProcessPoolExecutor (try both, measure performance)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+    synclog.info(f"Process files in parallel")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=16) as executor:
         futures = [
             executor.submit(process_file, fp, INDEX_DIRECTORY, metadata_docs_by_id)
             for fp in file_paths
@@ -531,19 +552,21 @@ async def sync_documents():
                 docs_to_add_or_update[doc_id] = doc
 
     # Delete in Meili any doc that we've identified as stale
+    synclog.info(f"Delete in Meili any doc that we've identified as stale")
     final_docs_to_delete = docs_to_delete_in_meili & set(meili_docs_by_id)
     if final_docs_to_delete:
         await delete_documents_by_id(list(final_docs_to_delete))
         await wait_for_meili_idle()
 
     # Add or update in Meili
+    synclog.info(f"Add or update in Meili")
     if docs_to_add_or_update:
         await add_or_update_documents(list(docs_to_add_or_update.values()))
         await wait_for_meili_idle()
 
     total_docs_in_meili = await get_document_count()
     save_modules_state()
-    logging.info(f"Sync complete. MeiliSearch has {total_docs_in_meili} documents")
+    synclog.info(f"Sync complete. MeiliSearch has {total_docs_in_meili} documents")
 
 
 # endregion
@@ -626,8 +649,12 @@ async def run_modules():
 # region "set schedule"
 
 
-def run_in_process(func):
-    process = Process(target=func)
+def run_async_in_loop(func, *args):
+    asyncio.run(func(*args))
+
+
+def run_in_process(func, *args):
+    process = Process(target=run_async_in_loop, args=(func,) + args)
     process.start()
     process.join()
 
@@ -641,6 +668,7 @@ async def main():
         args=[sync_documents],
         max_instances=1,
     )
+    await sync_documents()
     scheduler.start()
     await run_modules()
 
