@@ -1,0 +1,8 @@
+debugpy
+easyocr
+numpy
+pdf2image
+pillow
+python-magic
+rawpy
+wand

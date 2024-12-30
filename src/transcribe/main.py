@@ -346,9 +346,7 @@ def run(file_path, document, metadata_dir_path):
     diarize_segments = diarize_model(audio)
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
-    if version_path.exists():
-        document[NAME] = None
-
+    document[NAME] = {}
     segments = result.get("segments", [])
 
     if segments:

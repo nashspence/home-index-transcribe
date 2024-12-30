@@ -1,0 +1,5 @@
+debugpy
+ffmpeg-python
+jmespath
+pyexiftool
+tika

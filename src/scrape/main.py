@@ -2029,9 +2029,6 @@ def run(file_path, document, metadata_dir_path):
     else:
         desired_fields = jmespath_search_with_shaped_list(metadata, DESIRED_OTHER)
 
-    if version_path.exists():
-        document[NAME] = None
-
     document[NAME] = {}
 
     if desired_fields["latitude"] and desired_fields["longitude"]:
