@@ -16,9 +16,6 @@ if str(os.environ.get("WAIT_FOR_DEBUG_CLIENT", "false")).lower() == "true":
 # endregion
 # region "logging"
 
-if not os.path.exists("./data/logs"):
-    os.makedirs("./data/logs")
-
 import logging
 
 logging.basicConfig(level=logging.CRITICAL)
@@ -26,7 +23,7 @@ logging.basicConfig(level=logging.CRITICAL)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 file_handler = logging.RotatingFileHandler(
-    "./data/logs/home-index-orchestrator.log", maxBytes=5_000_000, backupCount=10
+    "/storage/home-index-orchestrator.log", maxBytes=5_000_000, backupCount=10
 )
 stream_handler = logging.StreamHandler()
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -39,7 +36,7 @@ logger.addHandler(stream_handler)
 synclog = logging.getLogger("home-index-sync")
 synclog.setLevel(logging.INFO)
 file_handler = logging.RotatingFileHandler(
-    "./data/logs/home-index-sync.log", maxBytes=5_000_000, backupCount=10
+    "/storage/home-index-sync.log", maxBytes=5_000_000, backupCount=10
 )
 stream_handler = logging.StreamHandler()
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -82,58 +79,59 @@ MEILISEARCH_HOST = os.environ.get("MEILISEARCH_HOST", "http://localhost:7700")
 MEILISEARCH_INDEX_NAME = os.environ.get("MEILISEARCH_INDEX_NAME", "files")
 RECHECK_TIME_AFTER_COMPLETE = int(os.environ.get("RECHECK_TIME_AFTER_COMPLETE", "1800"))
 
-INDEX_DIRECTORY = os.environ.get("INDEX_DIRECTORY", "/data")
+INDEX_DIRECTORY = os.environ.get("INDEX_DIRECTORY", "/files")
 if not os.path.exists(INDEX_DIRECTORY):
     os.makedirs(INDEX_DIRECTORY)
 
-ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "/data/archive")
+ARCHIVE_DIRECTORY = os.environ.get("ARCHIVE_DIRECTORY", "/files/archive")
 if not os.path.exists(ARCHIVE_DIRECTORY):
     os.makedirs(ARCHIVE_DIRECTORY)
 
-CACHE_FILE_PATH = os.environ.get("CACHE_FILE_PATH", "/data/metadata/cache")
-if not os.path.exists(os.path.dirname(CACHE_FILE_PATH)):
-    os.makedirs(os.path.dirname(CACHE_FILE_PATH))
-
-METADATA_DIRECTORY = os.environ.get("METADATA_DIRECTORY", "/data/metadata")
+METADATA_DIRECTORY = os.environ.get("METADATA_DIRECTORY", "/files/metadata")
 if not os.path.exists(METADATA_DIRECTORY):
     os.makedirs(METADATA_DIRECTORY)
 
-modules_file_path = "./data/modules_state.json"
 modules = {}
 module_values = []
 hellos = []
-modules_state_changed = False
+hello_versions = []
+hello_versions_changed = False
+hello_versions_file_path = "/storage/hello_versions.json"
 
 try:
     MODULES = os.environ.get("MODULES", "")
-    existing_data = {}
-    if os.path.exists(modules_file_path):
-        with open(modules_file_path, "r") as file:
-            existing_data = json.load(file)
-    existing_modules = existing_data.get("modules", "")
-    modules_state_changed = MODULES != existing_modules
-    for item in MODULES.split(","):
-        proxy = ServerProxy(item.strip())
+    for module_host in MODULES.split(","):
+        proxy = ServerProxy(module_host.strip())
         hello = proxy.hello()
         name = hello["name"]
+        version = hello["version"]
         hellos.append(hello)
+        hello_versions.append([name, version])
         if name in modules:
             raise ValueError(
                 f"multiple modules found with name {name}, this must be unique"
             )
         modules[name] = {"name": name, "proxy": proxy}
         module_values.append(modules[name])
+    hello_versions_json = {}
+    if os.path.exists(hello_versions_file_path):
+        with open(hello_versions_file_path, "r") as file:
+            hello_versions_json = json.load(file)
+    known_hello_versions = hello_versions_json.get("hello_versions", "")
+    hello_versions_changed = hello_versions != known_hello_versions
 except ValueError:
-    raise ValueError("MODULES format should be 'http://domain:port,http://domain:port,...'")
+    raise ValueError(
+        "MODULES format should be 'http://domain:port,http://domain:port,...'"
+    )
 
 
 initial_module_id = module_values[0]["name"] if module_values else "idle"
 
 
 def save_modules_state():
-    os.makedirs(os.path.dirname(modules_file_path), exist_ok=True)
-    with open(modules_file_path, "w") as file:
-        json.dump({"modules": MODULES}, file, indent=4)
+    os.makedirs(os.path.dirname(hello_versions_file_path), exist_ok=True)
+    with open(hello_versions_file_path, "w") as file:
+        json.dump({"hello_versions": hello_versions}, file)
 
 
 # endregion
@@ -477,7 +475,7 @@ def process_file(file_path, index_dir, metadata_docs_by_id):
             doc["type"] = new_type
             updated = True
 
-        if modules_state_changed:
+        if hello_versions_changed:
             doc["status"] = initial_module_id
 
         if updated:
@@ -619,9 +617,11 @@ async def run_module(name, proxy):
                         return True
                     file_relpath = file_relpath_from_meili_doc(document)
                     metadata_dir_relpath = metadata_dir_relpath_from_doc(name, document)
-                    proxy.run(file_relpath, document, metadata_dir_relpath)
-                    logging.info(f'{name} "{file_relpath}" commit update')
                     document = update_document_status(name, document)
+                    if document.get("status", "idle") == name:
+                        proxy.run(file_relpath, document, metadata_dir_relpath)
+                        document = update_document_status(name, document)
+                    logging.info(f'{name} "{file_relpath}" commit update')
                     await add_or_update_document(document)
                 except Exception as e:
                     logging.exception(

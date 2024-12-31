@@ -22,9 +22,8 @@ services:
       - '5678:5678' # debugpy
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/home-index:/app/data
-      - /home/ns/shared:/data
-      - ./bind-mounts/home-index/pytorch:/root/.cache/torch/
+      - ./bind-mounts/storage:/storage
+      - /home/ns/shared:/files
     networks:
       debug-net:
         ipv4_address: 172.34.0.12
@@ -36,6 +35,6 @@ services:
     image: getmeili/meilisearch:latest
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/meili_data:/meili_data
+      - ./bind-mounts/meilisearch:/meili_data
     networks:
       - debug-net

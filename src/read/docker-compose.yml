@@ -19,9 +19,8 @@ services:
       - '5678:5678' # debugpy
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/home-index:/app/data
+      - ./bind-mounts/home-index:/storage
       - /home/ns/shared:/files
-      - ./bind-mounts/home-index/pytorch:/root/.cache/torch/
     networks:
       debug-net:
         ipv4_address: 172.34.0.10
@@ -33,7 +32,7 @@ services:
     image: getmeili/meilisearch:latest
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/meili_data:/meili_data
+      - ./bind-mounts/meilisearch:/meili_data
     networks:
       - debug-net
   home-index:
@@ -45,13 +44,12 @@ services:
       - meilisearch
       - home-index-read-module
     environment:
-      - MODULES=http://172.34.0.10:9000
-      - MEILISEARCH_HOST=http://172.34.0.11:7700
+      - MODULES=http://home-index-read-module:9000
+      - MEILISEARCH_HOST=http://meilisearch:7700
       - TZ=America/Los_Angeles
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/home-index:/app/data
-      - /home/ns/shared:/data
-      - ./bind-mounts/home-index/pytorch:/root/.cache/torch/
+      - ./bind-mounts/storage:/storage
+      - /home/ns/shared:/files
     networks:
       - debug-net
