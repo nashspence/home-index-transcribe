@@ -27,7 +27,7 @@ import os
 import torch
 import gc
 from datetime import datetime, timedelta, timezone
-from ..run_server import run_server
+from home_index_module import run_server
 from pathlib import Path
 
 
