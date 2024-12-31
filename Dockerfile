@@ -1,13 +1,13 @@
-FROM python:slim
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     attr \
+    ffmpeg \
     file \
     git \
     tzdata \
-    shared-mime-info \
     && apt-get clean
 
 WORKDIR /app
