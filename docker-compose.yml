@@ -1,16 +1,25 @@
+x-gpu-service: &allow-gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [ gpu ]
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+    stack:
+      soft: 67108864
+      hard: 67108864
+
 services:
   home-index-transcribe:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: home-index-transcribe
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
     environment:
       - DEBUG=True
       - TZ=America/Los_Angeles
@@ -19,16 +28,10 @@ services:
     ports:
       - '5678:5678' # debugpy
     restart: unless-stopped
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      stack:
-        soft: 67108864
-        hard: 67108864
     volumes:
       - ./bind-mounts/pytorch:/root/.cache/
       - ./bind-mounts/home-index-root:/home-index-root
+    <<: *allow-gpu
   meilisearch:
     container_name: meilisearch
     environment:
