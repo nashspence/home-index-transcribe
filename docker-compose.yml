@@ -29,8 +29,8 @@ services:
       - '5678:5678' # debugpy
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/pytorch:/root/.cache/
       - ./bind-mounts/home-index-root:/home-index-root
+      - ./bind-mounts/home-index-transcribe/pytorch:/root/.cache
     <<: *allow-gpu
   meilisearch:
     container_name: meilisearch
