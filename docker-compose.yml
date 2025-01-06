@@ -5,13 +5,16 @@ services:
       dockerfile: Dockerfile
     container_name: home-index-transcribe
     environment:
+      - DEBUG=True
       - TZ=America/Los_Angeles
-      - WAIT_FOR_DEBUG_CLIENT
+      - PYTORCH_DOWNLOAD_ROOT
+      - WAIT_FOR_DEBUGPY_CLIENT=True
     ports:
       - '5678:5678' # debugpy
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/test-files:/files
+      - ./bind-mounts/pytorch:/pytorch
+      - ./bind-mounts/home-index-root:/home-index-root
   meilisearch:
     container_name: meilisearch
     environment:
@@ -33,7 +36,8 @@ services:
       - MODULES=http://home-index-transcribe:9000
       - MEILISEARCH_HOST=http://meilisearch:7700
       - TZ=America/Los_Angeles
+      - DEBUG=True
     restart: unless-stopped
     volumes:
-      - ./bind-mounts/home-index:/storage
-      - ./bind-mounts/test-files:/files
+      - ./bind-mounts/home-index:/home-index
+      - ./bind-mounts/home-index-root:/home-index-root

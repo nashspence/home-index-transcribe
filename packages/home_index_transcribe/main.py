@@ -6,7 +6,7 @@ import debugpy
 
 debugpy.listen(("0.0.0.0", 5678))
 
-if str(os.environ.get("WAIT_FOR_DEBUG_CLIENT", "false")).lower() == "true":
+if str(os.environ.get("WAIT_FOR_DEBUGPY_CLIENT", "False")) == "True":
     print("Waiting for debugger to attach...")
     debugpy.wait_for_client()
     print("Debugger attached.")
@@ -35,25 +35,7 @@ from pathlib import Path
 # region "ass subtitles"
 
 
-def generate_ass_subtitles(data, timestamp, offset_seconds, precision):
-    def format_datetime(segment_datetime, precision):
-        # Ensure precision is in valid range
-        precision = max(0, min(precision, 6))
-
-        # Define format levels
-        formats = [
-            "%Y",  # 0: Year
-            "%Y-%m",  # 1: Year-Month
-            "%Y-%m-%d",  # 2: Year-Month-Day
-            "%Y-%m-%d %H",  # 3: Year-Month-Day Hour
-            "%Y-%m-%d %H:%M",  # 4: Year-Month-Day Hour:Minute
-            "%Y-%m-%d %H:%M:%S",  # 5: Year-Month-Day Hour:Minute:Second
-            "%Y-%m-%d %H:%M:%S.%f",  # 6: Year-Month-Day Hour:Minute:Second.Microsecond
-        ]
-
-        # Format the datetime
-        return segment_datetime.strftime(formats[precision])
-
+def generate_ass_subtitles(data):
     # Function to generate visually distinct colors
     def generate_colors(n):
         """Generate n visually distinct colors."""
@@ -120,10 +102,6 @@ def generate_ass_subtitles(data, timestamp, offset_seconds, precision):
     # Collect style definitions
     style_definitions = []
 
-    # Define a style for the timestamp
-    timestamp_style = "Style: TimestampStyle,Arial,9,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,1,0,7,10,10,10,1"
-    style_definitions.append(timestamp_style)
-
     speaker_style_names = {}
     for speaker in speaker_list:
         primary_rgb = speaker_colors[speaker]
@@ -138,26 +116,6 @@ def generate_ass_subtitles(data, timestamp, offset_seconds, precision):
         style_definitions.append(style_line)
 
     dialogue_lines = []
-
-    # Compute the initial timestamp to display
-    if timestamp and offset_seconds:
-        initial_datetime = datetime.fromtimestamp(
-            timestamp, tz=timezone.utc
-        ) + timedelta(seconds=offset_seconds)
-        formatted_timestamp = format_datetime(initial_datetime, precision)
-    else:
-        formatted_timestamp = ""
-
-    # Create a dialogue line for the timestamp display
-    start_time = format_time(0)
-    end_time = format_time(5)
-    style = "TimestampStyle"
-    marginL = "10"
-    marginR = "10"
-    marginV = "10"
-    alignment = 7  # Top Left
-    timestamp_dialogue_line = f"Dialogue: 0,{start_time},{end_time},{style},, {marginL}, {marginR}, {marginV},,{{\\an{alignment}}}{formatted_timestamp}"
-    dialogue_lines.append(timestamp_dialogue_line)
 
     # Collect dialogue lines
     for segment in data["segments"]:
@@ -219,7 +177,7 @@ COMPUTE_TYPE = os.environ.get(
 LANGUAGE = os.environ.get("LANGUAGE", "en")
 THREADS = os.environ.get("THREADS", 16)
 NUM_WORKERS = None  # increasing NUM_WORKERS breaks whisperX model.transcribe
-PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/app/data/pytorch")
+PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/pytorch")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
 PYANNOTE_DIARIZATION_AUTH_TOKEN = os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN")
 SUPPORTED_MIME_TYPES = {
@@ -272,6 +230,7 @@ SUPPORTED_MIME_TYPES = {
 def hello():
     return {
         "name": NAME,
+        "version": VERSION,
         "filterable_attributes": [f"{NAME}.text"],
         "sortable_attributes": [],
     }
@@ -327,9 +286,6 @@ def check(file_path, document, metadata_dir_path):
     if not document["type"] in SUPPORTED_MIME_TYPES:
         return False
 
-    if not "creation_date" in document:
-        return False
-
     version_path = metadata_dir_path / "version.json"
     version = None
     if version_path.exists():
@@ -377,12 +333,7 @@ def run(file_path, document, metadata_dir_path):
             json.dump(result, file, indent=4)
 
         with open(subtitle_path, "w") as file:
-            creation_date = document["creation_date"]
-            offset_seconds = document.get("creation_date_offset_seconds", 0)
-            precision = document.get("creation_date_precision", 0)
-            file.write(
-                generate_ass_subtitles(result, creation_date, offset_seconds, precision)
-            )
+            file.write(generate_ass_subtitles(result))
 
     with open(version_path, "w") as file:
         json.dump({"version": VERSION}, file, indent=4)
