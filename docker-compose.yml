@@ -4,16 +4,30 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: home-index-transcribe
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
     environment:
       - DEBUG=True
       - TZ=America/Los_Angeles
-      - PYTORCH_DOWNLOAD_ROOT
+      - PYANNOTE_DIARIZATION_AUTH_TOKEN=${PYANNOTE_DIARIZATION_AUTH_TOKEN}
       - WAIT_FOR_DEBUGPY_CLIENT=True
     ports:
       - '5678:5678' # debugpy
     restart: unless-stopped
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
     volumes:
-      - ./bind-mounts/pytorch:/pytorch
+      - ./bind-mounts/pytorch:/root/.cache/
       - ./bind-mounts/home-index-root:/home-index-root
   meilisearch:
     container_name: meilisearch

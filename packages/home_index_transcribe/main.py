@@ -22,11 +22,8 @@ import collections
 import colorsys
 import json
 import re
-import whisperx
 import os
-import torch
 import gc
-from datetime import datetime, timedelta, timezone
 from home_index_module import run_server
 from pathlib import Path
 
@@ -177,7 +174,7 @@ COMPUTE_TYPE = os.environ.get(
 LANGUAGE = os.environ.get("LANGUAGE", "en")
 THREADS = os.environ.get("THREADS", 16)
 NUM_WORKERS = None  # increasing NUM_WORKERS breaks whisperX model.transcribe
-PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/pytorch")
+PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/root/.cache/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
 PYANNOTE_DIARIZATION_AUTH_TOKEN = os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN")
 SUPPORTED_MIME_TYPES = {
@@ -239,7 +236,7 @@ def hello():
 # endregion
 # region "load/unload"
 
-
+whisperx = None
 model = None
 align_model = None
 align_metadata = None
@@ -247,7 +244,10 @@ diarize_model = None
 
 
 def load():
-    global model, align_model, align_metadata, diarize_model
+    global whisperx, model, align_model, align_metadata, diarize_model
+    import whisperx as whisperx_module
+
+    whisperx = whisperx_module
 
     model = whisperx.load_model(
         WHISPER_MODEL,
@@ -270,10 +270,13 @@ def load():
 
 def unload():
     global model, align_model, align_metadata, diarize_model
+    import torch
+
     del model
     del align_model
     del align_metadata
     del diarize_model
+    del whisperx
     gc.collect()
     torch.cuda.empty_cache()
 

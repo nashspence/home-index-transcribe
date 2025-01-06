@@ -1,6 +1,8 @@
 .env
 /bind-mounts/meilisearch
 /bind-mounts/home-index
+/bind-mounts/pytorch
+/bind-mounts/home-index-root/metadata
 docker-compose.override*.yml
 docker-data
 venv
