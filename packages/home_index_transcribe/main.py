@@ -161,19 +161,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # endregion
 # region "config"
 
-
-VERSION = 1
 NAME = os.environ.get("NAME", "transcribe")
+VERSION = 1
+
 DEVICE = os.environ.get("DEVICE", "cuda")
-BATCH_SIZE = os.environ.get("BATCH_SIZE", 1)  # reduce if low on GPU mem
-
-COMPUTE_TYPE = os.environ.get(
-    "COMPUTE_TYPE", "int8"
-)  # change to "int8" if low on GPU mem (may reduce accuracy)
-
+BATCH_SIZE = os.environ.get("BATCH_SIZE", 16)
+COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "en")
-THREADS = os.environ.get("THREADS", 16)
-NUM_WORKERS = None  # increasing NUM_WORKERS breaks whisperX model.transcribe
+THREADS = os.environ.get("THREADS", 4)
 PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/root/.cache/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
 PYANNOTE_DIARIZATION_AUTH_TOKEN = os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN")
@@ -270,7 +265,7 @@ def load():
 
 
 def unload():
-    global model, align_model, align_metadata, diarize_model
+    global model, align_model, align_metadata, diarize_model, whisperx
     import torch
 
     del model
@@ -306,41 +301,61 @@ def run(file_path, document, metadata_dir_path):
     logging.info(f"start {file_path}")
 
     version_path = metadata_dir_path / "version.json"
-    transcription_path = metadata_dir_path / "transcription.json"
+    whisperx_path = metadata_dir_path / "whisperx.json"
+    plaintext_path = metadata_dir_path / "plaintext.txt"
     subtitle_path = metadata_dir_path / f"{Path(file_path).stem}.ass"
 
-    audio = whisperx.load_audio(file_path)
+    whisperx_exception = None
+    try:
+        audio = whisperx.load_audio(file_path)
+        result = model.transcribe(audio, language=LANGUAGE, batch_size=BATCH_SIZE)
 
-    result = model.transcribe(
-        audio, language=LANGUAGE, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS
-    )
+        result = whisperx.align(
+            result["segments"], align_model, align_metadata, audio, DEVICE
+        )
 
-    result = whisperx.align(
-        result["segments"], align_model, align_metadata, audio, DEVICE
-    )
+        diarize_segments = diarize_model(audio)
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+    except Exception as e:
+        whisperx_exception = e
+        logging.exception("whisperx failed")
 
-    diarize_segments = diarize_model(audio)
-    result = whisperx.assign_word_speakers(diarize_segments, result)
+    ass_subtitles_exception = None
 
     document[NAME] = {}
     segments = result.get("segments", [])
 
+    plaintext = ""
+    ass_subtitles_exception = None
     if segments:
-        transcribed_audio = " ".join(
-            [segment["text"] for segment in result["segments"]]
-        )
-
-        document[NAME] = {"text": transcribed_audio}
-        logging.info(f"{file_path}: {transcribed_audio}")
-
-        with open(transcription_path, "w") as file:
+        with open(whisperx_path, "w") as file:
             json.dump(result, file, indent=4)
 
-        with open(subtitle_path, "w") as file:
-            file.write(generate_ass_subtitles(result))
+        plaintext = " ".join([segment["text"] for segment in result["segments"]])
+
+        with open(plaintext_path, "w") as file:
+            file.write(plaintext)
+
+        try:
+            ass_subtitles = generate_ass_subtitles(result)
+            with open(subtitle_path, "w") as file:
+                file.write(ass_subtitles)
+        except Exception as e:
+            ass_subtitles_exception = e
+            logging.exception("ass subtitles failed")
+
+    document[NAME] = {"text": plaintext}
 
     with open(version_path, "w") as file:
-        json.dump({"version": VERSION}, file, indent=4)
+        json.dump(
+            {
+                "version": VERSION,
+                "whisperx_exception": whisperx_exception,
+                "ass_subtitles_exception": ass_subtitles_exception,
+            },
+            file,
+            indent=4,
+        )
 
     logging.info("done")
     return document
