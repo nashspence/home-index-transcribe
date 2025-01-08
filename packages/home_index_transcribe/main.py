@@ -365,4 +365,4 @@ def run(file_path, document, metadata_dir_path):
 # endregion
 
 if __name__ == "__main__":
-    run_server(hello, check, run, load, unload)
+    run_server(NAME, hello, check, run, load, unload)
