@@ -167,10 +167,13 @@ NAME = os.environ.get("NAME", "transcribe")
 VERSION = 1
 
 DEVICE = os.environ.get("DEVICE", "cuda")
-BATCH_SIZE = os.environ.get("BATCH_SIZE", 8)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(
+    os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+)
+BATCH_SIZE = os.environ.get("BATCH_SIZE", 4)
 COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "en")
-THREADS = os.environ.get("THREADS", 2)
+THREADS = os.environ.get("THREADS", 1)
 PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/root/.cache/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
 PYANNOTE_DIARIZATION_AUTH_TOKEN = os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN")
