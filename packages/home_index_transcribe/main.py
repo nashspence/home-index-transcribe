@@ -165,10 +165,10 @@ NAME = os.environ.get("NAME", "transcribe")
 VERSION = 1
 
 DEVICE = os.environ.get("DEVICE", "cuda")
-BATCH_SIZE = os.environ.get("BATCH_SIZE", 16)
+BATCH_SIZE = os.environ.get("BATCH_SIZE", 8)
 COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "en")
-THREADS = os.environ.get("THREADS", 4)
+THREADS = os.environ.get("THREADS", 2)
 PYTORCH_DOWNLOAD_ROOT = os.environ.get("PYTORCH_DOWNLOAD_ROOT", "/root/.cache/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
 PYANNOTE_DIARIZATION_AUTH_TOKEN = os.environ.get("PYANNOTE_DIARIZATION_AUTH_TOKEN")
@@ -306,6 +306,7 @@ def run(file_path, document, metadata_dir_path):
     subtitle_path = metadata_dir_path / f"{Path(file_path).stem}.ass"
 
     whisperx_exception = None
+    segments = None
     try:
         audio = whisperx.load_audio(file_path)
         result = model.transcribe(audio, language=LANGUAGE, batch_size=BATCH_SIZE)
@@ -316,14 +317,12 @@ def run(file_path, document, metadata_dir_path):
 
         diarize_segments = diarize_model(audio)
         result = whisperx.assign_word_speakers(diarize_segments, result)
+        segments = result.get("segments", [])
     except Exception as e:
         whisperx_exception = e
         logging.exception("whisperx failed")
 
-    ass_subtitles_exception = None
-
     document[NAME] = {}
-    segments = result.get("segments", [])
 
     plaintext = ""
     ass_subtitles_exception = None
@@ -350,8 +349,8 @@ def run(file_path, document, metadata_dir_path):
         json.dump(
             {
                 "version": VERSION,
-                "whisperx_exception": whisperx_exception,
-                "ass_subtitles_exception": ass_subtitles_exception,
+                "whisperx_exception": str(whisperx_exception),
+                "ass_subtitles_exception": str(ass_subtitles_exception),
             },
             file,
             indent=4,
