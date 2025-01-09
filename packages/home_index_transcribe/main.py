@@ -26,6 +26,7 @@ import json
 import re
 import os
 import gc
+import torch
 from home_index_module import run_server
 from pathlib import Path
 
@@ -246,6 +247,8 @@ diarize_model = None
 
 def load():
     global whisperx, model, align_model, align_metadata, diarize_model
+    print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
+    print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
     import whisperx as whisperx_module
 
     whisperx = whisperx_module
@@ -280,6 +283,8 @@ def unload():
     del whisperx
     gc.collect()
     torch.cuda.empty_cache()
+    print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
+    print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
 
 
 # endregion
@@ -295,7 +300,11 @@ def check(file_path, document, metadata_dir_path):
     if version_path.exists():
         with open(version_path, "r") as file:
             version = json.load(file)
-    if version and version.get("version") == VERSION:
+    if (
+        version
+        and version["version"] == VERSION
+        and version["whisperx_exception"] != "CUDA failed with error out of memory"
+    ):
         return False
 
     return True
