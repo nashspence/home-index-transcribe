@@ -170,7 +170,7 @@ DEVICE = os.environ.get("DEVICE", "cuda")
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(
     os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 )
-BATCH_SIZE = os.environ.get("BATCH_SIZE", 4)
+BATCH_SIZE = os.environ.get("BATCH_SIZE", 2)
 COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "en")
 THREADS = os.environ.get("THREADS", 1)
