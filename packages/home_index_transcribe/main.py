@@ -171,7 +171,7 @@ DEVICE = os.environ.get("DEVICE", "cuda")
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(
     os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 )
-BATCH_SIZE = os.environ.get("BATCH_SIZE", 2)
+BATCH_SIZE = os.environ.get("BATCH_SIZE", 3)
 COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "en")
 THREADS = os.environ.get("THREADS", 1)
@@ -323,14 +323,27 @@ def run(file_path, document, metadata_dir_path):
     segments = None
     try:
         audio = whisperx.load_audio(file_path)
+        print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
+        print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
         result = model.transcribe(audio, language=LANGUAGE, batch_size=BATCH_SIZE)
+        gc.collect()
+        torch.cuda.empty_cache()
 
+        print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
+        print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
         result = whisperx.align(
             result["segments"], align_model, align_metadata, audio, DEVICE
         )
+        gc.collect()
+        torch.cuda.empty_cache()
 
+        print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
+        print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
         diarize_segments = diarize_model(audio)
         result = whisperx.assign_word_speakers(diarize_segments, result)
+        gc.collect()
+        torch.cuda.empty_cache()
+
         segments = result.get("segments", [])
     except Exception as e:
         whisperx_exception = e
