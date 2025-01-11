@@ -247,8 +247,6 @@ diarize_model = None
 
 def load():
     global whisperx, model, align_model, align_metadata, diarize_model
-    print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
-    print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
     import whisperx as whisperx_module
 
     whisperx = whisperx_module
@@ -283,8 +281,6 @@ def unload():
     del whisperx
     gc.collect()
     torch.cuda.empty_cache()
-    print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
-    print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
 
 
 # endregion
@@ -300,11 +296,7 @@ def check(file_path, document, metadata_dir_path):
     if version_path.exists():
         with open(version_path, "r") as file:
             version = json.load(file)
-    if (
-        version
-        and version["version"] == VERSION
-        and version["whisperx_exception"] != "CUDA failed with error out of memory"
-    ):
+    if version and version["version"] == VERSION:
         return False
 
     return True
@@ -319,41 +311,45 @@ def run(file_path, document, metadata_dir_path):
     plaintext_path = metadata_dir_path / "plaintext.txt"
     subtitle_path = metadata_dir_path / f"{Path(file_path).stem}.ass"
 
-    whisperx_exception = None
-    segments = None
-    try:
+    def attempt(batch_size=BATCH_SIZE):
         audio = whisperx.load_audio(file_path)
-        print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
-        print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
-        result = model.transcribe(audio, language=LANGUAGE, batch_size=BATCH_SIZE)
+        result = model.transcribe(audio, language=LANGUAGE, batch_size=batch_size)
         gc.collect()
         torch.cuda.empty_cache()
 
-        print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
-        print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
         result = whisperx.align(
             result["segments"], align_model, align_metadata, audio, DEVICE
         )
         gc.collect()
         torch.cuda.empty_cache()
 
-        print(f"cuda.memory_allocated={torch.cuda.memory_allocated()}")
-        print(f"cuda.memory_reserved={torch.cuda.memory_reserved()}")
         diarize_segments = diarize_model(audio)
         result = whisperx.assign_word_speakers(diarize_segments, result)
         gc.collect()
         torch.cuda.empty_cache()
 
-        segments = result.get("segments", [])
+        return result
+
+    whisperx_exception = None
+    try:
+        result = attempt()
     except Exception as e:
-        whisperx_exception = e
-        logging.exception("whisperx failed")
+        if str(e).startswith("CUDA failed with error out of memory"):
+            try:
+                logging.warning("CUDA out of memory. Retrying with BATCH_SIZE=1.")
+                result = attempt(1)
+            except Exception as e:
+                whisperx_exception = e
+                logging.exception("failed")
+        else:
+            whisperx_exception = e
+            logging.exception("failed")
 
     document[NAME] = {}
 
     plaintext = ""
     ass_subtitles_exception = None
-    if segments:
+    if result.get("segments", []):
         with open(whisperx_path, "w") as file:
             json.dump(result, file, indent=4)
 
