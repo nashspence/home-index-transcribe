@@ -333,6 +333,8 @@ def run(file_path, document, metadata_dir_path):
     whisperx_exception = None
     try:
         result = attempt()
+    except FileNotFoundError as e:
+        raise e
     except Exception as e:
         if str(e).startswith("CUDA failed with error out of memory"):
             try:
@@ -362,6 +364,8 @@ def run(file_path, document, metadata_dir_path):
             ass_subtitles = generate_ass_subtitles(result)
             with open(subtitle_path, "w") as file:
                 file.write(ass_subtitles)
+        except FileNotFoundError as e:
+            raise e
         except Exception as e:
             ass_subtitles_exception = e
             logging.exception("ass subtitles failed")
