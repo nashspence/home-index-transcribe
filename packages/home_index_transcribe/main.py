@@ -254,6 +254,7 @@ def load():
     model = whisperx.load_model(
         WHISPER_MODEL,
         DEVICE,
+        vad_method="silero",
         compute_type=COMPUTE_TYPE,
         language=LANGUAGE,
         threads=THREADS,
