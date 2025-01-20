@@ -340,6 +340,8 @@ def run(file_path, document, metadata_dir_path):
             try:
                 logging.warning("CUDA out of memory. Retrying with BATCH_SIZE=1.")
                 result = attempt(1)
+            except FileNotFoundError as e:
+                raise e
             except Exception as e:
                 whisperx_exception = e
                 logging.exception("failed")
@@ -351,7 +353,7 @@ def run(file_path, document, metadata_dir_path):
 
     plaintext = ""
     ass_subtitles_exception = None
-    if result.get("segments", []):
+    if result and result.get("segments", []):
         with open(whisperx_path, "w") as file:
             json.dump(result, file, indent=4)
 
