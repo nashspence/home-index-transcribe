@@ -350,7 +350,7 @@ def run(file_path, document, metadata_dir_path):
             whisperx_exception = e
             logging.exception("failed")
 
-    if result and result.get("segments", []):
+    if result.get("segments", []):
         with open(whisperx_path, "w") as file:
             json.dump(result, file, indent=4)
             
