@@ -330,6 +330,7 @@ def run(file_path, document, metadata_dir_path):
 
         return result
 
+    result = {}
     whisperx_exception = None
     try:
         result = attempt()
@@ -340,6 +341,8 @@ def run(file_path, document, metadata_dir_path):
             try:
                 logging.warning("CUDA out of memory. Retrying with BATCH_SIZE=1.")
                 result = attempt(1)
+            except FileNotFoundError as e:
+                raise e
             except Exception as e:
                 whisperx_exception = e
                 logging.exception("failed")
@@ -347,19 +350,18 @@ def run(file_path, document, metadata_dir_path):
             whisperx_exception = e
             logging.exception("failed")
 
-    document[NAME] = {}
-
-    plaintext = ""
-    ass_subtitles_exception = None
-    if result.get("segments", []):
+    if result and result.get("segments", []):
         with open(whisperx_path, "w") as file:
             json.dump(result, file, indent=4)
-
+            
+        document[NAME] = {}
         plaintext = " ".join([segment["text"] for segment in result["segments"]])
+        document[NAME] = {"text": plaintext}
 
         with open(plaintext_path, "w") as file:
-            file.write(plaintext)
+            file.write(plaintext)        
 
+        ass_subtitles_exception = None
         try:
             ass_subtitles = generate_ass_subtitles(result)
             with open(subtitle_path, "w") as file:
@@ -369,8 +371,6 @@ def run(file_path, document, metadata_dir_path):
         except Exception as e:
             ass_subtitles_exception = e
             logging.exception("ass subtitles failed")
-
-    document[NAME] = {"text": plaintext}
 
     with open(version_path, "w") as file:
         json.dump(
