@@ -332,6 +332,7 @@ def run(file_path, document, metadata_dir_path):
 
     result = {}
     whisperx_exception = None
+    ass_subtitles_exception = None
     try:
         result = attempt()
     except FileNotFoundError as e:
@@ -353,15 +354,14 @@ def run(file_path, document, metadata_dir_path):
     if result and result.get("segments", []):
         with open(whisperx_path, "w") as file:
             json.dump(result, file, indent=4)
-            
+
         document[NAME] = {}
         plaintext = " ".join([segment["text"] for segment in result["segments"]])
         document[NAME] = {"text": plaintext}
 
         with open(plaintext_path, "w") as file:
-            file.write(plaintext)        
+            file.write(plaintext)
 
-        ass_subtitles_exception = None
         try:
             ass_subtitles = generate_ass_subtitles(result)
             with open(subtitle_path, "w") as file:
