@@ -372,16 +372,13 @@ def run(file_path, document, metadata_dir_path):
             ass_subtitles_exception = e
             logging.exception("ass subtitles failed")
 
+    version = {"version": VERSION}
+    if whisperx_exception:
+        version["exception"] = str(whisperx_exception)
+    if whisperx_exception:
+        version["exception"] = str(ass_subtitles_exception)
     with open(version_path, "w") as file:
-        json.dump(
-            {
-                "version": VERSION,
-                "whisperx_exception": str(whisperx_exception),
-                "ass_subtitles_exception": str(ass_subtitles_exception),
-            },
-            file,
-            indent=4,
-        )
+        json.dump(version, file, indent=4)
 
     logging.info("done")
     return document
