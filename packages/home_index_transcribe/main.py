@@ -375,8 +375,10 @@ def run(file_path, document, metadata_dir_path):
     version = {"version": VERSION}
     if whisperx_exception:
         version["exception"] = str(whisperx_exception)
+        version["whisperx_exception"] = str(whisperx_exception)
     if whisperx_exception:
         version["exception"] = str(ass_subtitles_exception)
+        version["ass_subtitles_exception"] = str(ass_subtitles_exception)
     with open(version_path, "w") as file:
         json.dump(version, file, indent=4)
 
