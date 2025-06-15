@@ -29,7 +29,7 @@ import gc
 import torch
 from home_index_module import run_server
 from pathlib import Path
-from .migration import migrate_v1_segments
+from .migration import apply_migrations
 from .chunk_utils import segments_to_chunk_docs
 
 
@@ -319,15 +319,15 @@ def run(file_path, document, metadata_dir_path):
         with open(version_path, "r") as file:
             prev_version = json.load(file)
 
-    segments = None
-    chunk_docs = []
-    if prev_version and prev_version.get("version") == 1 and VERSION == 2:
-        segments, chunk_docs = migrate_v1_segments(NAME, document, metadata_dir_path)
-        if segments is not None:
-            with open(version_path, "w") as file:
-                json.dump({"version": VERSION}, file, indent=4)
-            logging.info("migrated v1 segments to chunks")
-            return {"document": document, "chunk_docs": chunk_docs}
+    current_version = prev_version.get("version") if prev_version else 0
+    segments, chunk_docs, new_version = apply_migrations(
+        current_version, NAME, document, metadata_dir_path, VERSION
+    )
+    if new_version != current_version:
+        with open(version_path, "w") as file:
+            json.dump({"version": new_version}, file, indent=4)
+        logging.info("applied migration %s -> %s", current_version, new_version)
+        return {"document": document, "chunk_docs": chunk_docs}
 
     def attempt(batch_size=BATCH_SIZE):
         audio = whisperx.load_audio(file_path)
