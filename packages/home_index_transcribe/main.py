@@ -29,6 +29,8 @@ import gc
 import torch
 from home_index_module import run_server
 from pathlib import Path
+from .migration import migrate_v1_segments
+from .chunk_utils import segments_to_chunk_docs
 
 
 # endregion
@@ -165,7 +167,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # region "config"
 
 NAME = os.environ.get("NAME", "transcribe")
-VERSION = 1
+VERSION = 2
 
 DEVICE = os.environ.get("DEVICE", "cuda")
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(
@@ -308,8 +310,24 @@ def run(file_path, document, metadata_dir_path):
 
     version_path = metadata_dir_path / "version.json"
     whisperx_path = metadata_dir_path / "whisperx.json"
+    chunks_path = metadata_dir_path / "chunks.json"
     plaintext_path = metadata_dir_path / "plaintext.txt"
     subtitle_path = metadata_dir_path / f"{Path(file_path).stem}.ass"
+
+    prev_version = None
+    if version_path.exists():
+        with open(version_path, "r") as file:
+            prev_version = json.load(file)
+
+    segments = None
+    chunk_docs = []
+    if prev_version and prev_version.get("version") == 1 and VERSION == 2:
+        segments, chunk_docs = migrate_v1_segments(NAME, document, metadata_dir_path)
+        if segments is not None:
+            with open(version_path, "w") as file:
+                json.dump({"version": VERSION}, file, indent=4)
+            logging.info("migrated v1 segments to chunks")
+            return {"document": document, "chunk_docs": chunk_docs}
 
     def attempt(batch_size=BATCH_SIZE):
         audio = whisperx.load_audio(file_path)
@@ -333,37 +351,41 @@ def run(file_path, document, metadata_dir_path):
     result = {}
     whisperx_exception = None
     ass_subtitles_exception = None
-    try:
-        result = attempt()
-    except FileNotFoundError as e:
-        raise e
-    except Exception as e:
-        if str(e).startswith("CUDA failed with error out of memory"):
-            try:
-                logging.warning("CUDA out of memory. Retrying with BATCH_SIZE=1.")
-                result = attempt(1)
-            except FileNotFoundError as e:
-                raise e
-            except Exception as e:
+    if segments is None:
+        try:
+            result = attempt()
+        except FileNotFoundError as e:
+            raise e
+        except Exception as e:
+            if str(e).startswith("CUDA failed with error out of memory"):
+                try:
+                    logging.warning("CUDA out of memory. Retrying with BATCH_SIZE=1.")
+                    result = attempt(1)
+                except FileNotFoundError as e:
+                    raise e
+                except Exception as e:
+                    whisperx_exception = e
+                    logging.exception("failed")
+            else:
                 whisperx_exception = e
                 logging.exception("failed")
-        else:
-            whisperx_exception = e
-            logging.exception("failed")
+        segments = result.get("segments", [])
+        if segments:
+            with open(whisperx_path, "w") as file:
+                json.dump(result, file, indent=4)
 
-    if result and result.get("segments", []):
-        with open(whisperx_path, "w") as file:
-            json.dump(result, file, indent=4)
+    if segments:
+        with open(chunks_path, "w") as file:
+            json.dump(segments, file, indent=4)
 
-        document[NAME] = {}
-        plaintext = " ".join([segment["text"] for segment in result["segments"]])
+        plaintext = " ".join([segment.get("text", "") for segment in segments])
         document[NAME] = {"text": plaintext}
 
         with open(plaintext_path, "w") as file:
             file.write(plaintext)
 
         try:
-            ass_subtitles = generate_ass_subtitles(result)
+            ass_subtitles = generate_ass_subtitles({"segments": segments})
             with open(subtitle_path, "w") as file:
                 file.write(ass_subtitles)
         except FileNotFoundError as e:
@@ -372,18 +394,22 @@ def run(file_path, document, metadata_dir_path):
             ass_subtitles_exception = e
             logging.exception("ass subtitles failed")
 
+        chunk_docs = segments_to_chunk_docs(segments, document["id"], document, NAME)
+    elif not segments:
+        chunk_docs = []
+
     version = {"version": VERSION}
     if whisperx_exception:
         version["exception"] = str(whisperx_exception)
         version["whisperx_exception"] = str(whisperx_exception)
-    if whisperx_exception:
+    if ass_subtitles_exception:
         version["exception"] = str(ass_subtitles_exception)
         version["ass_subtitles_exception"] = str(ass_subtitles_exception)
     with open(version_path, "w") as file:
         json.dump(version, file, indent=4)
 
     logging.info("done")
-    return document
+    return {"document": document, "chunk_docs": chunk_docs}
 
 
 # endregion

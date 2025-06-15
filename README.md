@@ -23,6 +23,8 @@ Several environment variables control how WhisperX runs:
 - `COMPUTE_TYPE` – computation precision (`int8` by default)
 - `LANGUAGE` – language code (`en` by default)
 - `PYANNOTE_DIARIZATION_AUTH_TOKEN` – token for speaker diarization
+- `BASE_TIMESTAMP_PATH` – dot-delimited path within the document containing the
+  creation timestamp used when prefixing transcript chunks
 
 ### Running manually
 
