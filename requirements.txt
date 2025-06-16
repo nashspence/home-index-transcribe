@@ -1,3 +1,6 @@
 debugpy
 git+https://github.com/nashspence/home-index.git
 whisperx
+langchain-text-splitters
+transformers
+langchain-core

@@ -35,8 +35,10 @@ pip install -r requirements.txt
 python packages/home_index_transcribe/main.py
 ```
 
+
 The server listens on `0.0.0.0:9000`. Add its endpoint to the `MODULES` environment variable of Home Index so it is called during indexing.
 
 ## More information
 
 See the [Home Index documentation](https://github.com/nashspence/home-index) for details on the RPC module specification and additional configuration options.
+
