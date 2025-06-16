@@ -18,6 +18,7 @@ def migrate_v1_segments(name, document, metadata_dir_path):
         json.dump(segments, file, indent=4)
 
     chunk_docs = segments_to_chunk_docs(segments, document["id"], document, name)
+
     return segments, chunk_docs
 
 
