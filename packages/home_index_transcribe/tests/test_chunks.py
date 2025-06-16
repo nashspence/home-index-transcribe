@@ -6,6 +6,54 @@ torch = types.SimpleNamespace(cuda=types.SimpleNamespace(empty_cache=lambda: Non
 sys.modules.setdefault("torch", torch)
 home_index_module = types.ModuleType("home_index_module")
 home_index_module.run_server = lambda *a, **k: None
+def _segments_to_chunk_docs(segs, file_id, document=None, module_name="chunk"):
+    docs = []
+    for idx, s in enumerate(segs):
+        docs.append({"id": f"{module_name}_{file_id}_{idx}", "text": s["text"], "start": s["start"], "end": s["end"], "file_id": file_id})
+    return docs
+
+def _apply_migrations(from_version, migrations, *args, target_version):
+    if from_version >= target_version:
+        return None, [], from_version
+    if from_version >= len(migrations) or migrations[from_version] is None:
+        return None, [], from_version
+    segs, docs = migrations[from_version](*args)
+    return segs, docs if docs else [], from_version + 1
+
+home_index_module.run_server = lambda *a, **k: None
+home_index_module.segments_to_chunk_docs = _segments_to_chunk_docs
+home_index_module.apply_migrations = _apply_migrations
+def _apply_migrations_if_needed(md, migs, *args, target_version=None):
+    current = (_load_version(md) or {}).get("version", 0)
+    segs, docs, new = _apply_migrations(current, migs, *args, target_version=target_version)
+    if new != current:
+        _save_version(md, {"version": new})
+    return segs, docs, new
+
+home_index_module.apply_migrations_if_needed = _apply_migrations_if_needed
+def _load_version(metadata_dir_path):
+    path = Path(metadata_dir_path) / "version.json"
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+def _save_version(metadata_dir_path, data):
+    path = Path(metadata_dir_path) / "version.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+def _write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+home_index_module.load_version = _load_version
+home_index_module.save_version = _save_version
+home_index_module.save_version_with_exceptions = lambda md, version, **ex: _save_version(md, {"version": version, **{k:str(v) for k,v in ex.items() if v is not None}})
+home_index_module.write_json = _write_json
 sys.modules.setdefault("home_index_module", home_index_module)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -85,6 +133,7 @@ def test_multiple_migrations(tmp_path, monkeypatch):
         return None, []
 
     monkeypatch.setattr(transcribe, "VERSION", 3)
+    monkeypatch.setattr(transcribe, "MIGRATIONS", [None, migration.migrate_v1_segments, migrate_v2_to_v3])
     monkeypatch.setattr(migration, "MIGRATIONS", [None, migration.migrate_v1_segments, migrate_v2_to_v3])
 
     metadata_dir = tmp_path / transcribe.NAME

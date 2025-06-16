@@ -1,36 +1,23 @@
-# region "debugpy"
-
-
-import os
-
-if str(os.environ.get("DEBUG", "False")) == "True":
-    import debugpy
-
-    debugpy.listen(("0.0.0.0", 5678))
-
-    if str(os.environ.get("WAIT_FOR_DEBUGPY_CLIENT", "False")) == "True":
-        print("Waiting for debugger to attach...")
-        debugpy.wait_for_client()
-        print("Debugger attached.")
-        debugpy.breakpoint()
-
-
-# endregion
 # region "import"
 
 
 import logging
 import collections
 import colorsys
-import json
 import re
 import os
 import gc
 import torch
-from home_index_module import run_server
+from home_index_module import (
+    run_server,
+    segments_to_chunk_docs,
+    load_version,
+    apply_migrations_if_needed,
+    save_version_with_exceptions,
+    write_json,
+)
 from pathlib import Path
-from .migration import apply_migrations
-from .chunk_utils import segments_to_chunk_docs
+from .migration import MIGRATIONS
 
 
 # endregion
@@ -293,12 +280,8 @@ def check(file_path, document, metadata_dir_path):
     if not document["type"] in SUPPORTED_MIME_TYPES:
         return False
 
-    version_path = metadata_dir_path / "version.json"
-    version = None
-    if version_path.exists():
-        with open(version_path, "r") as file:
-            version = json.load(file)
-    if version and version["version"] == VERSION:
+    version = load_version(metadata_dir_path)
+    if version and version.get("version") == VERSION:
         return False
 
     return True
@@ -308,24 +291,22 @@ def run(file_path, document, metadata_dir_path):
     global model, align_model, align_metadata, diarize_model
     logging.info(f"start {file_path}")
 
-    version_path = metadata_dir_path / "version.json"
-    whisperx_path = metadata_dir_path / "whisperx.json"
-    chunks_path = metadata_dir_path / "chunks.json"
-    plaintext_path = metadata_dir_path / "plaintext.txt"
-    subtitle_path = metadata_dir_path / f"{Path(file_path).stem}.ass"
-
-    prev_version = None
-    if version_path.exists():
-        with open(version_path, "r") as file:
-            prev_version = json.load(file)
-
-    current_version = prev_version.get("version") if prev_version else 0
-    segments, chunk_docs, new_version = apply_migrations(
-        current_version, NAME, document, metadata_dir_path, VERSION
+    metadata_dir = Path(metadata_dir_path)
+    whisperx_path = metadata_dir / "whisperx.json"
+    chunks_path = metadata_dir / "chunks.json"
+    plaintext_path = metadata_dir / "plaintext.txt"
+    subtitle_path = metadata_dir / f"{Path(file_path).stem}.ass"
+    prev_version = load_version(metadata_dir_path) or {}
+    current_version = prev_version.get("version", 0)
+    segments, chunk_docs, new_version = apply_migrations_if_needed(
+        metadata_dir_path,
+        MIGRATIONS,
+        NAME,
+        document,
+        metadata_dir_path,
+        target_version=VERSION,
     )
     if new_version != current_version:
-        with open(version_path, "w") as file:
-            json.dump({"version": new_version}, file, indent=4)
         logging.info("applied migration %s -> %s", current_version, new_version)
         return {"document": document, "chunk_docs": chunk_docs}
 
@@ -371,12 +352,10 @@ def run(file_path, document, metadata_dir_path):
                 logging.exception("failed")
         segments = result.get("segments", [])
         if segments:
-            with open(whisperx_path, "w") as file:
-                json.dump(result, file, indent=4)
+            write_json(whisperx_path, result)
 
     if segments:
-        with open(chunks_path, "w") as file:
-            json.dump(segments, file, indent=4)
+        write_json(chunks_path, segments)
 
         plaintext = " ".join([segment.get("text", "") for segment in segments])
         document[NAME] = {"text": plaintext}
@@ -398,15 +377,12 @@ def run(file_path, document, metadata_dir_path):
     elif not segments:
         chunk_docs = []
 
-    version = {"version": VERSION}
-    if whisperx_exception:
-        version["exception"] = str(whisperx_exception)
-        version["whisperx_exception"] = str(whisperx_exception)
-    if ass_subtitles_exception:
-        version["exception"] = str(ass_subtitles_exception)
-        version["ass_subtitles_exception"] = str(ass_subtitles_exception)
-    with open(version_path, "w") as file:
-        json.dump(version, file, indent=4)
+    save_version_with_exceptions(
+        metadata_dir_path,
+        VERSION,
+        whisperx_exception=whisperx_exception,
+        ass_subtitles_exception=ass_subtitles_exception,
+    )
 
     logging.info("done")
     return {"document": document, "chunk_docs": chunk_docs}
