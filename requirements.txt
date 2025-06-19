@@ -1,5 +1,5 @@
 debugpy
-git+https://github.com/nashspence/home-index.git
+git+https://github.com/nashspence/home-index.git#76cbc0da344a34cfb16e9c43b22db179fee87e27
 whisperx
 langchain-text-splitters
 transformers
